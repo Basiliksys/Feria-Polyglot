@@ -503,6 +503,46 @@ function broadcastPeerLanguageUpdate(speakerClient) {
   }
 }
 
+const DEFAULT_STUN_URLS = [
+  'stun:stun.l.google.com:19302',
+  'stun:stun1.l.google.com:19302',
+  'stun:stun.cloudflare.com:3478'
+];
+// Public best-effort relay so direct audio works without extra setup. Operators
+// can replace it with a private TURN via TURN_URL / TURN_USERNAME /
+// TURN_CREDENTIAL (credentials are necessarily visible to browser clients).
+const DEFAULT_TURN_URLS = [
+  'turn:openrelay.metered.ca:80',
+  'turn:openrelay.metered.ca:80?transport=tcp',
+  'turn:openrelay.metered.ca:443?transport=tcp'
+];
+
+function parseIceUrls(value, fallback) {
+  const raw = typeof value === 'string' && value.trim() ? value : fallback;
+  return String(raw)
+    .split(',')
+    .map((url) => url.trim())
+    .filter((url) => /^(stuns?|turns?):/i.test(url) && url.length <= 512)
+    .slice(0, 16);
+}
+
+function buildRtcConfig() {
+  const stunUrls = parseIceUrls(process.env.STUN_URLS, DEFAULT_STUN_URLS.join(','));
+  const turnUrls = parseIceUrls(
+    process.env.TURN_URL || process.env.TURN_URLS,
+    DEFAULT_TURN_URLS.join(',')
+  );
+  const iceServers = stunUrls.map((urls) => ({ urls }));
+  if (turnUrls.length) {
+    iceServers.push({
+      urls: turnUrls,
+      username: String(process.env.TURN_USERNAME || 'openrelayproject').slice(0, 256),
+      credential: String(process.env.TURN_CREDENTIAL || 'openrelayproject').slice(0, 512)
+    });
+  }
+  return { iceServers };
+}
+
 const app = express();
 // One trusted proxy hop in front of Render; X-Forwarded-For alone is untrusted.
 app.set('trust proxy', 1);
@@ -525,6 +565,10 @@ app.get('/api/health', (_req, res) => {
     rejectedMessages: stats.rejectedMessages,
     droppedAudioChunks: stats.droppedAudioChunks
   });
+});
+
+app.get('/api/rtc-config', (_req, res) => {
+  res.json(buildRtcConfig());
 });
 
 app.post('/api/export-state', (req, res) => {

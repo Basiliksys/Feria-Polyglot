@@ -1,11 +1,29 @@
 (() => {
-  const ICE_CONFIG = {
+  // Server-supplied ICE config (STUN + TURN). Without TURN, players behind
+  // symmetric NATs can never establish a direct path and stay on the relay.
+  let ICE_CONFIG = {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
       { urls: 'stun:stun.cloudflare.com:3478' }
     ]
   };
+  const rtcConfigPromise = (async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const res = await fetch('/api/rtc-config', { cache: 'no-store', signal: controller.signal });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data.iceServers) && data.iceServers.length) {
+        ICE_CONFIG = { iceServers: data.iceServers };
+      }
+    } catch {
+      // Keep the built-in STUN list if the endpoint is unavailable.
+    } finally {
+      clearTimeout(timeout);
+    }
+  })();
 
   const LS_KEYS = {
     NOISE_GATE: 'feria_noise_gate_pct',
@@ -264,7 +282,8 @@
   });
 
   // -------------------- WEBSOCKET CONNECTION --------------------
-  function connectAndJoin(joinPayload, attempt = 0) {
+  async function connectAndJoin(joinPayload, attempt = 0) {
+    await rtcConfigPromise;
     audioEngine.ensureInitialized().catch(() => {});
     state.intentionalLeave = false;
     state.joinPayload = joinPayload;
@@ -295,7 +314,8 @@
         try {
           const frame = RelayProtocol.decodeRelayFrame(event.data);
           const peerState = state.peers.get(frame.senderId);
-          if (peerState) noteRelayFrame(frame.senderId);
+          if (!shouldPlayRelay(frame.senderId)) return;
+          noteRelayFrame(frame.senderId);
           await audioEngine.playRelayedAudioChunk(frame.senderId, frame, peerState);
         } catch (err) {
           console.warn('Dropped malformed relay frame:', err.message);
@@ -447,7 +467,8 @@
       case 'AUDIO_RELAY_CHUNK': {
         // Legacy base64 form, kept so an older server deployment still works.
         const peerState = state.peers.get(msg.fromClientId);
-        if (peerState) noteRelayFrame(msg.fromClientId);
+        if (!shouldPlayRelay(msg.fromClientId)) break;
+        noteRelayFrame(msg.fromClientId);
         const binary = atob(msg.pcmBase64);
         const bytes = new Uint8Array(binary.length);
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
@@ -762,7 +783,12 @@
     // ever sent, relay availability is never detected, and the UI is stuck on
     // "Перепідключення..." forever.
     if (window.PeerSession.shouldSendRelay(connState)) state.relayTargetIds.add(peerId);
-    else state.relayTargetIds.delete(peerId);
+    else {
+      state.relayTargetIds.delete(peerId);
+      // Drop relay audio that was already scheduled for playback; otherwise it
+      // overlaps the fresh WebRTC stream and sounds like a loop.
+      audioEngine.stopRelayPlayback(peerId);
+    }
     audioEngine.setRelayTargetsCount(state.relayTargetIds.size);
 
     const card = document.querySelector(`.peer-card[data-client-id="${peerId}"]`);
@@ -789,6 +815,10 @@
   function noteRelayFrame(peerId) {
     const action = getTransport(peerId).noteRelayAvailable(Date.now());
     if (action === 'use-relay') setPeerConnState(peerId, 'relay');
+  }
+
+  function shouldPlayRelay(peerId) {
+    return window.PeerSession.shouldPlayRelay(peerId, state.peers, state.transports);
   }
 
   function isFreshSignaling(msg) {
@@ -932,6 +962,7 @@
       if (!isCurrent(pc)) return;
       const stream = event.streams[0] || new MediaStream([event.track]);
       try {
+        audioEngine.stopRelayPlayback(peerId);
         await audioEngine.attachPeerStream(peerId, stream, state.peers.get(peerId));
       } catch (err) {
         console.warn('[webrtc] attach stream failed:', peerId, err.message);

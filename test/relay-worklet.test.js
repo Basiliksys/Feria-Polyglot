@@ -94,6 +94,26 @@ test('syllable onset uses a soft breath instead of a loud click', () => {
   assert.ok(proc.syllableCooldown >= 0.12 * sandbox.sampleRate, 'onsets are spaced further apart');
 });
 
+test('grain anchors are randomised instead of replaying a fixed loop', () => {
+  const { registered } = loadProcessors();
+  const Scrambler = registered['polyglot-scrambler-processor'];
+  const proc = new Scrambler();
+  proc.activeWritten = 40000;
+  proc.writeIdx = 1000;
+
+  const randoms = [0.1, 0.1, 0.9, 0.9];
+  let cursor = 0;
+  proc.nextRand = () => randoms[cursor++];
+
+  const grainA = { active: false, pos: 0, len: 0, rate: 1, anchor: 0 };
+  const grainB = { active: false, pos: 0, len: 0, rate: 1, anchor: 0 };
+  proc.resetGrain(grainA, 9600, 0.94);
+  proc.resetGrain(grainB, 9600, 0.94);
+
+  assert.equal(grainA.active, true);
+  assert.notEqual(grainA.anchor, grainB.anchor, 'two grains read different speech slices');
+});
+
 test('relay tap fails fast when RelayProtocol is missing', () => {
   let captured;
   const sandbox = {

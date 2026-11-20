@@ -143,6 +143,49 @@ function localEnv(port, dir, extra = {}) {
   };
 }
 
+test('rtc config advertises TURN so players can escape symmetric NATs', { timeout: 30000 }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feria-rtc-'));
+  const port = await freePort();
+  const server = await startServer(localEnv(port, dir, {
+    TURN_URL: '', TURN_URLS: '', TURN_USERNAME: '', TURN_CREDENTIAL: ''
+  }));
+  t.after(async () => {
+    await stopServer(server);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const res = await fetch(`http://127.0.0.1:${port}/api/rtc-config`);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('cache-control'), 'no-store');
+  const config = await res.json();
+  const turn = config.iceServers.find((entry) => String(entry.urls).includes('turn:'));
+  assert.ok(turn, 'a TURN server is advertised by default');
+  assert.ok(turn.username && turn.credential);
+  assert.ok(config.iceServers.some((entry) => String(entry.urls).includes('stun:')));
+});
+
+test('rtc config uses operator-provided TURN credentials', { timeout: 30000 }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feria-rtc-override-'));
+  const port = await freePort();
+  const server = await startServer(localEnv(port, dir, {
+    TURN_URL: 'turn:turn.example.com:3478?transport=tcp',
+    TURN_USERNAME: 'operator-user',
+    TURN_CREDENTIAL: 'operator-secret'
+  }));
+  t.after(async () => {
+    await stopServer(server);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const res = await fetch(`http://127.0.0.1:${port}/api/rtc-config`);
+  const config = await res.json();
+  const turn = config.iceServers.find((entry) => String(entry.urls).includes('turn.example.com'));
+  assert.ok(turn, 'default public TURN is replaced');
+  assert.equal(turn.username, 'operator-user');
+  assert.equal(turn.credential, 'operator-secret');
+  assert.ok(!String(turn.urls).includes('openrelay.metered.ca'));
+});
+
 test('health returns 503 when Upstash cannot be reached', { timeout: 30000 }, async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feria-health-'));
   const port = await freePort();

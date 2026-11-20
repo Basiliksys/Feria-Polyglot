@@ -8,6 +8,7 @@ const {
   reconcilePeers,
   capIceQueue,
   shouldSendRelay,
+  shouldPlayRelay,
   withEpoch,
   TransportStateMachine,
   PerfectNegotiator
@@ -62,6 +63,19 @@ test('relay stays armed until a direct connection is confirmed', () => {
     assert.equal(shouldSendRelay(state), true, `${state} still needs the relay tap`);
   }
   assert.equal(shouldSendRelay('connected'), false);
+});
+
+test('inbound relay audio stops once direct audio is confirmed', () => {
+  const peers = new Map([['a', peer('a')]]);
+  const transports = new Map([['a', { state: TRANSPORT_STATE.CONNECTING }]]);
+
+  assert.equal(shouldPlayRelay('a', peers, transports), true);
+  assert.equal(shouldPlayRelay('old-peer', peers, transports), false, 'stale frames are dropped');
+
+  transports.get('a').state = TRANSPORT_STATE.RELAY;
+  assert.equal(shouldPlayRelay('a', peers, transports), true);
+  transports.get('a').state = TRANSPORT_STATE.DIRECT;
+  assert.equal(shouldPlayRelay('a', peers, transports), false, 'no duplicate audio after connect');
 });
 
 test('withEpoch preserves WebIDL description/candidate fields on the prototype', () => {

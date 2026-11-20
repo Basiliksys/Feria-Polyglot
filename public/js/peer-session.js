@@ -74,6 +74,17 @@
     return connState !== 'connected';
   }
 
+  /**
+   * Relay audio is a fallback only. Frames from unknown peers are stale, and
+   * frames received after a direct connection is confirmed would duplicate the
+   * WebRTC stream (audible echo/loop).
+   */
+  function shouldPlayRelay(peerId, peers, transports) {
+    if (!peers || !peers.has(peerId)) return false;
+    const transport = transports && transports.get(peerId);
+    return !transport || transport.state !== TRANSPORT_STATE.DIRECT;
+  }
+
   /** Attaches a session epoch to signaling payloads without losing WebIDL fields. */
   function withEpoch(value, epoch) {
     if (!value) return value;
@@ -267,6 +278,7 @@
     reconcilePeers,
     capIceQueue,
     shouldSendRelay,
+    shouldPlayRelay,
     withEpoch,
     TransportStateMachine,
     PerfectNegotiator

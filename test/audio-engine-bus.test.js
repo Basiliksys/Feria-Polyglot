@@ -135,6 +135,11 @@ class FakeAudioContext {
   createBufferSource() {
     const node = new FakeNode(this, 'bufferSource');
     node.start = () => {};
+    node.stop = () => {
+      node.stopped = (node.stopped || 0) + 1;
+      if (node.onended) node.onended();
+    };
+    this.lastSource = node;
     return node;
   }
 }
@@ -149,7 +154,10 @@ function createEngine() {
   registry.keyFor = registryApi.keyFor;
   registry.presetSignature = registryApi.presetSignature;
   const sandbox = {
-    window: { AudioContext: FakeAudioContext },
+    window: {
+      AudioContext: FakeAudioContext,
+      RelayProtocol: { int16ToFloat32: (pcm) => Float32Array.from(pcm, (v) => v / 32768) }
+    },
     document: { createElement: () => ({ play: () => Promise.resolve(), srcObject: null }) },
     AudioWorkletNode: FakeAudioWorkletNode,
     DspBusRegistry: registry,
@@ -303,6 +311,26 @@ test('voice activity gates the outgoing stream and the self-monitor preview', as
     await engine.enableSelfMonitor(false);
     engine.teardownLocalPipeline();
   }
+});
+
+test('switching to direct audio cancels queued relay playback', async () => {
+  const engine = createEngine();
+  await engine.ensureInitialized();
+  const peer = gibberishPeer('common');
+  await engine.playRelayedAudioChunk('p1', {
+    pcm: new Int16Array([0, 100, 0, -100]),
+    sampleRate: 24000
+  }, peer);
+
+  const chain = engine.peerChains.get('p1');
+  const source = engine.ctx.lastSource;
+  assert.equal(chain.relaySources.size, 1);
+  assert.equal(source.stopped, undefined);
+
+  engine.stopRelayPlayback('p1');
+  assert.equal(chain.relaySources.size, 0);
+  assert.equal(chain.nextRelayTime, 0);
+  assert.equal(source.stopped, 1, 'scheduled relay audio is stopped');
 });
 
 test('short keyboard/mouse clicks do not open the noise gate', async () => {

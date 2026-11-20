@@ -27,9 +27,8 @@ class PolyglotScramblerProcessor extends AudioWorkletProcessor {
     this.writeIdx = 0;
     this.activeWritten = 0;
 
-    // Permutation offsets for distant syllable jumps
-    this.permOffsets = [0.35, 0.72, 0.18, 0.55, 0.85, 0.42];
-    this.permIdx = 0;
+    // Grain look-back is randomised per grain; a fixed offset cycle made the
+    // same syllable repeat audibly every few grains ("loop" artefact).
 
     // Two overlapping grains staggered by 50%
     this.grainA = { active: false, pos: 0, anchor: 0, len: 6720, rate: 1.0 };
@@ -105,19 +104,16 @@ class PolyglotScramblerProcessor extends AudioWorkletProcessor {
     grain.active = true;
     grain.pos = 0;
     grain.len = grainLen;
-    const jitter = 0.92 + this.nextRand() * 0.16;
+    const jitter = 0.88 + this.nextRand() * 0.24;
     grain.rate = Math.max(0.45, Math.min(1.9, pitchRatio * jitter));
 
     const neededBack = Math.ceil(grainLen * grain.rate) + 32;
     const maxAvail = Math.min(this.activeWritten, Math.round(sampleRate * 1.4));
-
-    let offsetBack = 16;
-    if (maxAvail > neededBack * 2) {
-      const permFrac = this.permOffsets[this.permIdx % this.permOffsets.length];
-      this.permIdx++;
-      const lookbackSpan = maxAvail - neededBack;
-      offsetBack = Math.max(16, Math.min(lookbackSpan, Math.floor(permFrac * lookbackSpan)));
-    }
+    const minBack = Math.min(neededBack, maxAvail);
+    const span = Math.max(1, maxAvail - minBack);
+    // Pick a fresh slice of recent speech for every grain instead of replaying
+    // the same anchor from a short fixed cycle.
+    const offsetBack = minBack + Math.floor(this.nextRand() * span);
 
     grain.anchor = (this.writeIdx - offsetBack + this.bufSize) % this.bufSize;
   }

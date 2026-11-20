@@ -296,7 +296,10 @@ class PolyglotAudioEngine {
       userVolume: 1.0,
       userMuted: false,
       whisperMuted: false,
-      nextRelayTime: 0
+      nextRelayTime: 0,
+      // Scheduled relay buffers must be cancellable when direct audio takes
+      // over, otherwise the same phrase is heard twice (echo / "loop").
+      relaySources: new Set()
     };
 
     this.applyChainState(chain, initialMode, initialPreset);
@@ -422,8 +425,27 @@ class PolyglotAudioEngine {
     const src = this.ctx.createBufferSource();
     src.buffer = audioBuf;
     src.connect(chain.inputNode);
+    const forget = () => {
+      chain.relaySources.delete(src);
+      try { src.disconnect(); } catch {}
+    };
+    src.onended = forget;
+    chain.relaySources.add(src);
     src.start(chain.nextRelayTime);
     chain.nextRelayTime += audioBuf.duration;
+  }
+
+  /** Cancels queued relay audio for a peer that switched to direct WebRTC. */
+  stopRelayPlayback(clientId) {
+    const chain = this.peerChains.get(clientId);
+    if (!chain) return;
+    chain.nextRelayTime = 0;
+    for (const src of [...chain.relaySources]) {
+      src.onended = null;
+      try { src.stop(); } catch {}
+      try { src.disconnect(); } catch {}
+    }
+    chain.relaySources.clear();
   }
 
   updatePeerLanguage(clientId, peerState) {
@@ -470,6 +492,11 @@ class PolyglotAudioEngine {
 
   destroyChain(chain) {
     this.releaseChainBus(chain);
+    for (const src of [...(chain.relaySources || [])]) {
+      src.onended = null;
+      try { src.stop(); } catch {}
+    }
+    chain.relaySources?.clear();
     try {
       chain.source?.disconnect();
       chain.inputNode.disconnect();
