@@ -6,6 +6,12 @@
     ]
   };
 
+  const LS_KEYS = {
+    NOISE_GATE: 'feria_noise_gate_pct',
+    PEER_VOLUMES: 'feria_peer_volumes_v1',
+    DM_BACKUP: 'feria_dm_backup_v1'
+  };
+
   const audioEngine = new window.PolyglotAudioEngine();
 
   const state = {
@@ -19,17 +25,59 @@
     peers: new Map(), // clientId -> peer object
     peerConnections: new Map(), // clientId -> RTCPeerConnection
     peerSenders: new Map(), // clientId -> RTCRtpSender
-    peerVolumes: new Map(), // clientId -> 0..2
+    peerConnStates: new Map(), // clientId -> 'connecting' | 'connected' | 'relay'
+    peerConnTimers: new Map(), // clientId -> timeout id
+    relayTargetIds: new Set(),
+    peerPrefs: loadPeerPrefs(), // charKey -> { volume, muted }
     messages: [],
     localStream: null,
+    outgoingStream: null,
     micMuted: false,
     micEnabled: false,
     hoveredLanguageId: null,
     replyPromptLang: null,
+    whisperTarget: null, // { clientId, characterId, name }
+    latestSnapshot: null,
+    pendingBackupSnapshot: null,
     dmLastRevealedTarget: 'ALL',
     activeHandoutMsgId: null,
     isBuilderPreviewing: false
   };
+
+  function loadPeerPrefs() {
+    try {
+      const raw = localStorage.getItem(LS_KEYS.PEER_VOLUMES);
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function savePeerPrefs() {
+    try {
+      localStorage.setItem(LS_KEYS.PEER_VOLUMES, JSON.stringify(state.peerPrefs));
+    } catch {}
+  }
+
+  function getPeerPrefKey(peer) {
+    return peer?.characterId || (peer?.role === 'dm' ? 'dm' : peer?.clientId);
+  }
+
+  function getPeerAudioPref(peer) {
+    const key = getPeerPrefKey(peer);
+    const p = state.peerPrefs[key];
+    return {
+      volume: typeof p?.volume === 'number' ? p.volume : 1.0,
+      muted: !!p?.muted
+    };
+  }
+
+  function setPeerAudioPref(peer, patch) {
+    const key = getPeerPrefKey(peer);
+    const cur = getPeerAudioPref(peer);
+    state.peerPrefs[key] = { ...cur, ...patch };
+    savePeerPrefs();
+  }
 
   // DOM helpers
   const $ = (id) => document.getElementById(id);
@@ -151,8 +199,14 @@
           $('dmDashboard').classList.remove('hidden');
           $('dmHandoutControls').classList.remove('hidden');
           $('clearChatBtn').classList.remove('hidden');
+          $('dmHearGibberishWrap').classList.remove('hidden');
+          if (msg.fullStateSnapshot) {
+            state.latestSnapshot = msg.fullStateSnapshot;
+            checkAndOfferDmBackup(msg.fullStateSnapshot);
+          }
         }
 
+        initNoiseGateFromStorage();
         renderIdentityHeader();
         renderLanguagePanel();
         renderPeersGrid();
@@ -174,6 +228,11 @@
         state.characters = msg.characters || [];
         state.messages = msg.messages || [];
 
+        if (state.role === 'dm' && msg.fullStateSnapshot) {
+          state.latestSnapshot = msg.fullStateSnapshot;
+          saveDmBackup(msg.fullStateSnapshot);
+        }
+
         (msg.peers || []).forEach((p) => {
           state.peers.set(p.clientId, p);
           audioEngine.updatePeerLanguage(p.clientId, p);
@@ -186,6 +245,35 @@
         renderChatMessages();
         updateActiveLanguageVisuals();
         break;
+
+      case 'IMPORT_SUCCESS':
+        $('dmBackupRestoreBanner').classList.add('hidden');
+        showToast('💾 Кампанію та хроніку відновлено з резервної копії!');
+        break;
+
+      case 'SELF_WHISPER_UPDATED':
+        if (msg.targetClientId || msg.targetCharacterId) {
+          state.whisperTarget = {
+            clientId: msg.targetClientId,
+            characterId: msg.targetCharacterId,
+            name: msg.targetName || 'Співрозмовник'
+          };
+          $('whisperTargetLabel').textContent = state.whisperTarget.name;
+          $('whisperActiveBanner').classList.remove('hidden');
+          $('chatInput').placeholder = `🔮 Телепатичний шепіт для ${state.whisperTarget.name}...`;
+        } else {
+          state.whisperTarget = null;
+          $('whisperActiveBanner').classList.add('hidden');
+          $('chatInput').placeholder = 'Записати фразу обраною мовою або текст напису...';
+        }
+        renderPeersGrid();
+        break;
+
+      case 'AUDIO_RELAY_CHUNK': {
+        const peerState = state.peers.get(msg.fromClientId);
+        await audioEngine.playRelayedAudioChunk(msg.fromClientId, msg.pcmBase64, msg.sampleRate, peerState);
+        break;
+      }
 
       case 'SELF_LANGUAGE_UPDATED':
         state.activeLanguageId = msg.languageId;
@@ -312,7 +400,9 @@
       const track = newStream.getAudioTracks()[0];
       if (track) track.enabled = !state.micMuted;
 
-      await audioEngine.setLocalStream(newStream);
+      const gatedStream = await audioEngine.setLocalStream(newStream);
+      state.outgoingStream = gatedStream || newStream;
+
       audioEngine.onLocalSpeakingChange = (isSpeaking, level) => {
         $('micLevelBar').style.width = `${Math.round(level * 100)}%`;
         wsSend({ type: 'SPEAKING_STATE', isSpeaking, level });
@@ -320,10 +410,21 @@
         if (selfCard) selfCard.classList.toggle('speaking', isSpeaking);
       };
 
-      // Update any existing peer connections with the new audio track
+      audioEngine.onAudioRelayChunk = (pcmBase64, sampleRate) => {
+        if (state.relayTargetIds.size === 0) return;
+        wsSend({
+          type: 'AUDIO_RELAY_CHUNK',
+          targetClientIds: [...state.relayTargetIds],
+          pcmBase64,
+          sampleRate
+        });
+      };
+
+      const outgoingTrack = state.outgoingStream.getAudioTracks()[0] || track;
+      // Update any existing peer connections with the gated audio track
       for (const [peerId, sender] of state.peerSenders.entries()) {
-        if (track && sender) {
-          await sender.replaceTrack(track);
+        if (outgoingTrack && sender) {
+          await sender.replaceTrack(outgoingTrack);
         }
       }
 
@@ -391,6 +492,37 @@
     audioEngine.setAtmosphericEnabled(e.target.checked);
   });
 
+  $('dmHearGibberishToggle').addEventListener('change', (e) => {
+    audioEngine.setDmHearAsGibberish(e.target.checked);
+  });
+
+  function applyNoiseGatePct(pct) {
+    const clamped = Math.max(0, Math.min(100, Number(pct) || 0));
+    $('noiseGateSlider').value = String(clamped);
+    $('noiseGateLabel').textContent = `${clamped}%`;
+    $('micGateMarker').style.left = `${clamped}%`;
+    const threshold = clamped === 0 ? 0.001 : 0.003 + (clamped / 100) * 0.075;
+    audioEngine.setNoiseGateThreshold(threshold);
+    try { localStorage.setItem(LS_KEYS.NOISE_GATE, String(clamped)); } catch {}
+  }
+
+  function initNoiseGateFromStorage() {
+    let saved = 25;
+    try {
+      const raw = localStorage.getItem(LS_KEYS.NOISE_GATE);
+      if (raw !== null) saved = Number(raw);
+    } catch {}
+    applyNoiseGatePct(saved);
+  }
+
+  $('noiseGateSlider').addEventListener('input', (e) => {
+    applyNoiseGatePct(e.target.value);
+  });
+
+  $('stopWhisperBtn').addEventListener('click', () => {
+    wsSend({ type: 'SET_WHISPER_TARGET', targetClientId: null, targetCharacterId: null });
+  });
+
   $('selfMonitorBtn').addEventListener('click', async () => {
     const next = !audioEngine.selfMonitorEnabled;
     if (next && !state.micEnabled) {
@@ -412,20 +544,66 @@
     window.location.href = window.location.pathname;
   });
 
+  function setPeerConnState(peerId, connState) {
+    state.peerConnStates.set(peerId, connState);
+    if (connState === 'relay') {
+      state.relayTargetIds.add(peerId);
+    } else if (connState === 'connected') {
+      state.relayTargetIds.delete(peerId);
+    }
+    audioEngine.setRelayTargetsCount(state.relayTargetIds.size);
+
+    const badge = document.querySelector(`.peer-card[data-client-id="${peerId}"] .peer-conn-label`);
+    if (badge) {
+      badge.textContent = formatConnStateLabel(connState);
+    }
+  }
+
+  function formatConnStateLabel(connState) {
+    if (connState === 'connected') return '🟢 Прямий зв’язок';
+    if (connState === 'relay') return '🟣 Ретранслятор';
+    return '🟡 З’єднання...';
+  }
+
   async function setupPeerConnection(peerId) {
     cleanupPeerConnection(peerId);
+    setPeerConnState(peerId, 'connecting');
+
     const pc = new RTCPeerConnection(ICE_CONFIG);
     state.peerConnections.set(peerId, pc);
 
-    const track = state.localStream?.getAudioTracks()[0];
+    const streamForSend = state.outgoingStream || state.localStream;
+    const track = streamForSend?.getAudioTracks()[0];
     let sender;
     if (track) {
-      sender = pc.addTrack(track, state.localStream);
+      sender = pc.addTrack(track, streamForSend);
     } else {
       const transceiver = pc.addTransceiver('audio', { direction: 'sendrecv' });
       sender = transceiver.sender;
     }
     state.peerSenders.set(peerId, sender);
+
+    const fallbackTimer = setTimeout(() => {
+      const st = state.peerConnStates.get(peerId);
+      if (st !== 'connected') {
+        setPeerConnState(peerId, 'relay');
+      }
+    }, 6000);
+    state.peerConnTimers.set(peerId, fallbackTimer);
+
+    const checkConnection = () => {
+      const cState = pc.connectionState;
+      const iState = pc.iceConnectionState;
+      if (cState === 'connected' || iState === 'connected' || iState === 'completed') {
+        clearTimeout(state.peerConnTimers.get(peerId));
+        setPeerConnState(peerId, 'connected');
+      } else if (cState === 'failed' || iState === 'failed' || cState === 'disconnected') {
+        clearTimeout(state.peerConnTimers.get(peerId));
+        setPeerConnState(peerId, 'relay');
+      }
+    };
+    pc.onconnectionstatechange = checkConnection;
+    pc.oniceconnectionstatechange = checkConnection;
 
     pc.onicecandidate = (event) => {
       if (event.candidate) {
@@ -437,8 +615,9 @@
       const stream = event.streams[0] || new MediaStream([event.track]);
       const peerState = state.peers.get(peerId);
       await audioEngine.attachPeerStream(peerId, stream, peerState);
-      const vol = state.peerVolumes.get(peerId);
-      if (vol !== undefined) audioEngine.setPeerVolume(peerId, vol);
+      const pref = getPeerAudioPref(peerState);
+      audioEngine.setPeerVolume(peerId, pref.volume);
+      audioEngine.setPeerMuted(peerId, pref.muted);
     };
 
     // Deterministic initiator to prevent WebRTC offer glare
@@ -476,6 +655,11 @@
   }
 
   function cleanupPeerConnection(peerId) {
+    clearTimeout(state.peerConnTimers.get(peerId));
+    state.peerConnTimers.delete(peerId);
+    state.peerConnStates.delete(peerId);
+    state.relayTargetIds.delete(peerId);
+    audioEngine.setRelayTargetsCount(state.relayTargetIds.size);
     audioEngine.detachPeerStream(peerId);
     const pc = state.peerConnections.get(peerId);
     if (pc) {
@@ -483,6 +667,12 @@
     }
     state.peerConnections.delete(peerId);
     state.peerSenders.delete(peerId);
+  }
+
+  async function reconnectPeer(peerId) {
+    showToast('🔄 Перепідключення аудіо-з’єднання...');
+    await setupPeerConnection(peerId);
+    renderPeersGrid();
   }
 
   // -------------------- UI RENDERING --------------------
@@ -694,15 +884,28 @@
       card.dataset.clientId = peer.clientId;
       card.dataset.characterId = peer.characterId || '';
 
-      const vol = state.peerVolumes.get(peer.clientId) ?? 1;
-      const statusHtml = peer.understood
-        ? `<div class="peer-lang-status" style="border-left:3px solid ${peer.languageColor}">
-             <span>${peer.languageIcon} ${escapeHtml(peer.languageName)}</span>
-           </div>`
-        : `<div class="peer-lang-status unknown">
-             <span>❓ Невідома мова</span>
+      const pref = getPeerAudioPref(peer);
+      const volPct = Math.round(pref.volume * 100);
+      const connState = state.peerConnStates.get(peer.clientId) || 'connecting';
+      const isWhisperingToThis = state.whisperTarget &&
+        (state.whisperTarget.clientId === peer.clientId ||
+          (peer.characterId && state.whisperTarget.characterId === peer.characterId));
+
+      let statusHtml;
+      if (peer.mutedByWhisper) {
+        statusHtml = `<div class="peer-lang-status unknown">
+             <span>🤫 Таємний шепіт (не вам)</span>
+           </div>`;
+      } else if (peer.understood) {
+        statusHtml = `<div class="peer-lang-status" style="border-left:3px solid ${peer.languageColor}">
+             <span>${peer.languageIcon} ${escapeHtml(peer.languageName)}${peer.isWhisperToMe ? ' (🔮 Шепіт вам)' : ''}</span>
+           </div>`;
+      } else {
+        statusHtml = `<div class="peer-lang-status unknown">
+             <span>❓ Невідома мова${peer.isWhisperToMe ? ' (🔮 Шепіт вам)' : ''}</span>
              <span class="mystic-runes-anim">ᚠᚦᚱ</span>
            </div>`;
+      }
 
       card.innerHTML = `
         <div class="peer-top">
@@ -715,19 +918,60 @@
           </div>
         </div>
         ${statusHtml}
+        <div class="peer-conn-row">
+          <span class="peer-conn-label">${formatConnStateLabel(connState)}</span>
+          <div class="peer-actions-row">
+            <button type="button" class="btn btn-sm btn-ghost peer-whisper-btn ${isWhisperingToThis ? 'btn-active' : ''}" title="Телепатичний шепіт лише цьому гравцю">
+              🔮 Шепіт
+            </button>
+            <button type="button" class="btn btn-sm btn-ghost peer-reconnect-btn" title="Перепідключити звук">🔄</button>
+          </div>
+        </div>
         <div class="peer-volume-row">
-          <span>🔊</span>
-          <input type="range" min="0" max="2" step="0.05" value="${vol}" />
+          <button type="button" class="btn btn-sm btn-ghost peer-mute-btn" title="Вимкнути/Увімкнути звук учасника">
+            ${pref.muted ? '🔇' : '🔊'}
+          </button>
+          <input type="range" min="0" max="2" step="0.05" value="${pref.volume}" />
+          <span class="peer-vol-pct">${volPct}%</span>
         </div>
       `;
 
-      const slider = card.querySelector('input[type="range"]');
-      slider.addEventListener('input', (e) => {
-        const v = Number(e.target.value);
-        state.peerVolumes.set(peer.clientId, v);
-        audioEngine.setPeerVolume(peer.clientId, v);
+      const muteBtn = card.querySelector('.peer-mute-btn');
+      muteBtn.addEventListener('click', () => {
+        const cur = getPeerAudioPref(peer);
+        const nextMuted = !cur.muted;
+        setPeerAudioPref(peer, { muted: nextMuted });
+        audioEngine.setPeerMuted(peer.clientId, nextMuted);
+        muteBtn.textContent = nextMuted ? '🔇' : '🔊';
       });
 
+      const slider = card.querySelector('input[type="range"]');
+      const pctLabel = card.querySelector('.peer-vol-pct');
+      slider.addEventListener('input', (e) => {
+        const v = Number(e.target.value);
+        setPeerAudioPref(peer, { volume: v });
+        audioEngine.setPeerVolume(peer.clientId, v);
+        pctLabel.textContent = `${Math.round(v * 100)}%`;
+      });
+
+      card.querySelector('.peer-reconnect-btn').addEventListener('click', () => {
+        reconnectPeer(peer.clientId);
+      });
+
+      card.querySelector('.peer-whisper-btn').addEventListener('click', () => {
+        if (isWhisperingToThis) {
+          wsSend({ type: 'SET_WHISPER_TARGET', targetClientId: null, targetCharacterId: null });
+        } else {
+          wsSend({
+            type: 'SET_WHISPER_TARGET',
+            targetClientId: peer.clientId,
+            targetCharacterId: peer.characterId || null
+          });
+        }
+      });
+
+      audioEngine.setPeerVolume(peer.clientId, pref.volume);
+      audioEngine.setPeerMuted(peer.clientId, pref.muted);
       grid.appendChild(card);
     }
 
@@ -832,6 +1076,86 @@
       container.appendChild(row);
     });
   }
+
+  function saveDmBackup(snapshot) {
+    if (!snapshot) return;
+    try {
+      localStorage.setItem(LS_KEYS.DM_BACKUP, JSON.stringify(snapshot));
+    } catch {}
+  }
+
+  function checkAndOfferDmBackup(serverSnap) {
+    try {
+      const raw = localStorage.getItem(LS_KEYS.DM_BACKUP);
+      if (!raw) {
+        saveDmBackup(serverSnap);
+        return;
+      }
+      const cached = JSON.parse(raw);
+      const cachedCount = (cached.messages?.length || 0) + (cached.languages?.length || 0) + (cached.characters?.length || 0);
+      const serverCount = (serverSnap.messages?.length || 0) + (serverSnap.languages?.length || 0) + (serverSnap.characters?.length || 0);
+
+      if (cachedCount > serverCount && Array.isArray(cached.languages) && Array.isArray(cached.characters)) {
+        state.pendingBackupSnapshot = cached;
+        $('dmBackupRestoreText').textContent =
+          `💾 У браузері є резервна копія кампанії (повідомлень: ${cached.messages?.length || 0}, мов: ${cached.languages?.length || 0}, героїв: ${cached.characters?.length || 0}). Відновити її на сервері?`;
+        $('dmBackupRestoreBanner').classList.remove('hidden');
+      } else {
+        saveDmBackup(serverSnap);
+      }
+    } catch {
+      saveDmBackup(serverSnap);
+    }
+  }
+
+  $('restoreBackupBtn').addEventListener('click', () => {
+    if (state.pendingBackupSnapshot) {
+      wsSend({ type: 'DM_IMPORT_STATE', snapshot: state.pendingBackupSnapshot });
+      state.pendingBackupSnapshot = null;
+    }
+  });
+
+  $('dismissBackupBtn').addEventListener('click', () => {
+    $('dmBackupRestoreBanner').classList.add('hidden');
+    if (state.latestSnapshot) saveDmBackup(state.latestSnapshot);
+  });
+
+  $('exportStateBtn').addEventListener('click', () => {
+    const snap = state.latestSnapshot || {
+      version: 1,
+      exportedAt: Date.now(),
+      languages: state.languages,
+      characters: state.characters,
+      messages: state.messages
+    };
+    const blob = new Blob([JSON.stringify(snap, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `feria-campaign-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  $('importStateBtn').addEventListener('click', () => {
+    $('importStateFile').click();
+  });
+
+  $('importStateFile').addEventListener('change', (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const snapshot = JSON.parse(reader.result);
+        wsSend({ type: 'DM_IMPORT_STATE', snapshot });
+      } catch {
+        showToast('⚠️ Не вдалося прочитати JSON-файл резервної копії.');
+      }
+      e.target.value = '';
+    };
+    reader.readAsText(file, 'utf8');
+  });
 
   $('resetAllDialoguesBtn').addEventListener('click', () => {
     wsSend({ type: 'DM_RESET_FORCED_LANGUAGES' });
@@ -1063,6 +1387,9 @@
         : `${msg.languageIcon} ${msg.languageName}`;
 
       const badges = [];
+      if (msg.isWhisper) {
+        badges.push(`<span class="whisper-badge">🔮 Телепатія${msg.whisperTargetName ? ` → ${escapeHtml(msg.whisperTargetName)}` : ''}</span>`);
+      }
       if (msg.partiallyDeciphered) {
         badges.push(`<span class="decipher-badge">🔍 Розшифровано на ${msg.revealPercent}%</span>`);
       }

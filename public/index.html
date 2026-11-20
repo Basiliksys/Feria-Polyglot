@@ -191,17 +191,28 @@
             <span id="micBtnIcon">🎙️</span>
             <span id="micBtnLabel">Мікрофон</span>
           </button>
-          <div class="mic-meter" title="Рівень сигналу мікрофона">
+          <div class="mic-meter" title="Рівень сигналу мікрофона і поріг шумодаву">
             <div id="micLevelBar" class="mic-level-fill"></div>
+            <div id="micGateMarker" class="mic-gate-marker" title="Поріг шумодаву"></div>
           </div>
           <select id="micSelect" class="select-compact" title="Вибір мікрофона">
             <option value="">Стандартний мікрофон</option>
           </select>
         </div>
 
+        <label class="toggle-pill noise-gate-pill" title="Відсікає фоновий шум кімнати та клавіатури, коли ви мовчите">
+          <span>🔇 Шумодав <strong id="noiseGateLabel">25%</strong></span>
+          <input type="range" id="noiseGateSlider" min="0" max="100" step="5" value="25" />
+        </label>
+
         <label class="toggle-pill" title="Ті, хто знає мову, чують розбірливий голос із легким тематичним забарвленням">
           <input type="checkbox" id="atmosphericToggle" checked />
           <span>✨ Атмосферний тембр</span>
+        </label>
+
+        <label id="dmHearGibberishWrap" class="toggle-pill hidden" title="Дозволяє Майстру тимчасово чути не-Загальні мови гравців у вигляді тарабарщини">
+          <input type="checkbox" id="dmHearGibberishToggle" />
+          <span>👂 Чути тарабарщину як гравці</span>
         </label>
 
         <div class="self-monitor-group">
@@ -241,6 +252,14 @@
       <div class="left-column">
         <!-- Language Resonator & Switcher Panel -->
         <section class="panel language-panel">
+          <!-- Whisper / Telepathy Active Banner -->
+          <div id="whisperActiveBanner" class="whisper-banner hidden">
+            <div>
+              <span>🔮 Телепатичний шепіт для: <strong id="whisperTargetLabel"></strong> — інші не чують вас</span>
+            </div>
+            <button id="stopWhisperBtn" type="button" class="btn btn-sm btn-light">Завершити шепіт</button>
+          </div>
+
           <!-- Focal Centerpiece: Active Tongue Altar -->
           <div id="activeTongueAltar" class="tongue-altar">
             <div class="altar-seal" id="altarSealIcon">🗣️</div>
@@ -276,9 +295,20 @@
 
         <!-- DM Dashboard (Only visible for DM) -->
         <section id="dmDashboard" class="panel dm-panel hidden">
+          <div id="dmBackupRestoreBanner" class="dm-backup-banner hidden">
+            <div id="dmBackupRestoreText">💾 Знайдено локальну резервну копію кампанії в браузері (можливо, сервер Render прокинувся після сну).</div>
+            <div class="dm-backup-actions">
+              <button id="restoreBackupBtn" type="button" class="btn btn-sm btn-brass">Відновити з бекапу</button>
+              <button id="dismissBackupBtn" type="button" class="btn btn-sm btn-ghost">✕</button>
+            </div>
+          </div>
+
           <div class="panel-header">
             <h2>Панель Майстра</h2>
             <div class="dm-header-actions">
+              <button id="exportStateBtn" type="button" class="btn btn-ghost btn-sm" title="Зберегти мови, героїв та хроніку у JSON-файл">📥 Експорт JSON</button>
+              <button id="importStateBtn" type="button" class="btn btn-ghost btn-sm" title="Відновити стан кампанії з JSON-файлу">📤 Імпорт JSON</button>
+              <input type="file" id="importStateFile" accept=".json,application/json" class="hidden" />
               <button id="resetAllDialoguesBtn" class="btn btn-ghost btn-sm">Скинути всі діалоги</button>
               <button id="openLangBuilderBtn" class="btn btn-brass btn-sm">+ Нова мова / шифр</button>
             </div>

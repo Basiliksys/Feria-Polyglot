@@ -496,8 +496,9 @@ input:focus, select:focus, textarea:focus {
 }
 
 .mic-meter {
-  width: 52px;
-  height: 6px;
+  position: relative;
+  width: 60px;
+  height: 7px;
   background: var(--basalt-void);
   border-radius: 3px;
   overflow: hidden;
@@ -509,6 +510,60 @@ input:focus, select:focus, textarea:focus {
   width: 0%;
   background: linear-gradient(90deg, var(--emerald-sage), var(--bright-brass));
   transition: width 0.06s linear;
+}
+
+.mic-gate-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  left: 25%;
+  background: #f5b7b7;
+  box-shadow: 0 0 4px rgba(185, 56, 56, 0.8);
+  pointer-events: none;
+}
+
+.noise-gate-pill {
+  gap: 8px;
+}
+
+.noise-gate-pill input[type="range"] {
+  width: 72px;
+  padding: 0;
+  height: 4px;
+  accent-color: var(--tarnished-brass);
+}
+
+.whisper-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 14px;
+  border-radius: 4px;
+  background: rgba(139, 92, 246, 0.16);
+  border: 1px solid rgba(139, 92, 246, 0.6);
+  color: #e4d8ff;
+  font-size: 0.9rem;
+}
+
+.dm-backup-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 4px;
+  background: rgba(200, 157, 84, 0.14);
+  border: 1px solid var(--tarnished-brass);
+  font-size: 0.88rem;
+}
+
+.dm-backup-actions {
+  display: flex;
+  gap: 6px;
 }
 
 .toggle-pill {
@@ -850,7 +905,7 @@ input:focus, select:focus, textarea:focus {
 .peer-volume-row {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   font-size: 0.78rem;
   color: var(--weathered-ash);
 }
@@ -860,6 +915,36 @@ input:focus, select:focus, textarea:focus {
   padding: 0;
   height: 4px;
   accent-color: var(--tarnished-brass);
+}
+
+.peer-vol-pct {
+  min-width: 36px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.peer-conn-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 0.76rem;
+  color: var(--weathered-ash);
+}
+
+.peer-actions-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.whisper-badge {
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(139, 92, 246, 0.25);
+  border: 1px solid rgba(139, 92, 246, 0.5);
+  color: #e4d8ff;
 }
 
 /* DM Dashboard */

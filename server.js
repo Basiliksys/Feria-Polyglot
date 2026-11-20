@@ -25,7 +25,8 @@ const SCRIPT_ALPHABETS = {
 
 let state = loadState();
 const clients = new Map(); // clientId -> client record
-const messages = []; // In-memory session messages & handouts
+const messages = Array.isArray(state.messages) ? state.messages : []; // Persisted session messages & handouts
+state.messages = messages;
 
 function loadState() {
   try {
@@ -33,12 +34,13 @@ function loadState() {
     return JSON.parse(raw);
   } catch (err) {
     console.error('Failed to read campaign-state.json:', err);
-    return { dmPin: '1250', languages: [], characters: [] };
+    return { dmPin: '1250', languages: [], characters: [], messages: [] };
   }
 }
 
 function saveState() {
   try {
+    state.messages = messages;
     const dir = path.dirname(DATA_PATH);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
@@ -183,12 +185,67 @@ function buildCharactersForClient(client) {
   });
 }
 
+function isWhisperActive(client) {
+  return !!(client.whisperTargetClientId || client.whisperTargetCharacterId);
+}
+
+function isWhisperAllowed(speakerClient, listenerClient) {
+  if (!isWhisperActive(speakerClient)) return true;
+  if (listenerClient.id === speakerClient.id) return true;
+  if (speakerClient.whisperTargetClientId && listenerClient.id === speakerClient.whisperTargetClientId) {
+    return true;
+  }
+  if (speakerClient.whisperTargetCharacterId && listenerClient.characterId === speakerClient.whisperTargetCharacterId) {
+    return true;
+  }
+  return false;
+}
+
+function canSeeMessage(msg, recipient) {
+  if (!msg.isWhisper) return true;
+  if (recipient.role === 'dm') return true;
+  if (recipient.id === msg.senderClientId) return true;
+  if (msg.senderCharacterId && recipient.characterId === msg.senderCharacterId) return true;
+  if (msg.whisperTargetClientId && recipient.id === msg.whisperTargetClientId) return true;
+  if (msg.whisperTargetCharacterId && recipient.characterId === msg.whisperTargetCharacterId) return true;
+  return false;
+}
+
+function buildFullStateSnapshot() {
+  return {
+    version: 1,
+    exportedAt: Date.now(),
+    languages: state.languages,
+    characters: state.characters,
+    messages
+  };
+}
+
 /**
  * Projects a speaker's language state for a specific listener, hiding language identity
  * if the listener cannot understand it while preserving dspPreset for audio scrambling.
+ * Handles Telepathy/Whisper isolation so non-target listeners are muted completely.
  */
 function projectLanguageForListener(speakerClient, listenerClient) {
   const lang = getLanguageById(speakerClient.activeLanguageId) || getLanguageById('common');
+  const whisperOn = isWhisperActive(speakerClient);
+  const whisperAllowed = isWhisperAllowed(speakerClient, listenerClient);
+
+  if (whisperOn && !whisperAllowed) {
+    return {
+      languageId: 'whisper',
+      languageName: '🤫 Таємний шепіт',
+      languageIcon: '🤫',
+      languageColor: '#64748b',
+      scriptStyle: lang.scriptStyle,
+      understood: false,
+      canReplyInLanguage: false,
+      isWhisperToMe: false,
+      mutedByWhisper: true,
+      dspPreset: lang.dspPreset
+    };
+  }
+
   const listenerChar = getClientCharacter(listenerClient);
   const understood = canUnderstand(listenerClient.role, listenerChar, lang.id);
   const canReplyInLanguage = canSpeak(listenerClient.role, listenerChar, lang.id);
@@ -202,6 +259,8 @@ function projectLanguageForListener(speakerClient, listenerClient) {
       scriptStyle: lang.scriptStyle,
       understood: true,
       canReplyInLanguage,
+      isWhisperToMe: whisperOn && whisperAllowed,
+      mutedByWhisper: false,
       dspPreset: lang.dspPreset
     };
   }
@@ -214,6 +273,8 @@ function projectLanguageForListener(speakerClient, listenerClient) {
     scriptStyle: lang.scriptStyle,
     understood: false,
     canReplyInLanguage: false,
+    isWhisperToMe: whisperOn && whisperAllowed,
+    mutedByWhisper: false,
     dspPreset: lang.dspPreset
   };
 }
@@ -280,6 +341,8 @@ function projectMessageForListener(msg, listenerClient) {
     revealPercent,
     translatedForParty: !!msg.translatedForParty,
     translatedBy: msg.translatedBy || null,
+    isWhisper: !!msg.isWhisper,
+    whisperTargetName: msg.whisperTargetName || null,
     text: visibleText
   };
 
@@ -315,15 +378,19 @@ function broadcastStateSync() {
       }
     }
 
-    sendJson(client.ws, {
+    const payload = {
       type: 'STATE_SYNC',
       character: char,
       activeLanguageId: client.activeLanguageId,
       languages: getSpeakableLanguagesForClient(client),
       characters: buildCharactersForClient(client),
       peers,
-      messages: messages.map((m) => projectMessageForListener(m, client))
-    });
+      messages: messages.filter((m) => canSeeMessage(m, client)).map((m) => projectMessageForListener(m, client))
+    };
+    if (client.role === 'dm') {
+      payload.fullStateSnapshot = buildFullStateSnapshot();
+    }
+    sendJson(client.ws, payload);
   }
 }
 
@@ -345,6 +412,14 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', uptime: process.uptime(), clients: clients.size });
+});
+
+app.get('/api/export-state', (req, res) => {
+  if (String(req.query.pin || '') !== String(state.dmPin)) {
+    res.status(403).json({ error: 'Invalid DM PIN' });
+    return;
+  }
+  res.json(buildFullStateSnapshot());
 });
 
 app.get('/api/lobby', (_req, res) => {
@@ -381,6 +456,8 @@ wss.on('connection', (ws) => {
     role: 'player',
     characterId: null,
     activeLanguageId: 'common',
+    whisperTargetClientId: null,
+    whisperTargetCharacterId: null,
     isSpeaking: false,
     speakingLevel: 0
   };
@@ -448,7 +525,7 @@ function handleMessage(client, data) {
         }
       }
 
-      sendJson(client.ws, {
+      const joinPayload = {
         type: 'JOIN_SUCCESS',
         clientId: client.id,
         role: client.role,
@@ -457,8 +534,12 @@ function handleMessage(client, data) {
         languages: getSpeakableLanguagesForClient(client),
         characters: buildCharactersForClient(client),
         peers,
-        messages: messages.map((m) => projectMessageForListener(m, client))
-      });
+        messages: messages.filter((m) => canSeeMessage(m, client)).map((m) => projectMessageForListener(m, client))
+      };
+      if (client.role === 'dm') {
+        joinPayload.fullStateSnapshot = buildFullStateSnapshot();
+      }
+      sendJson(client.ws, joinPayload);
       break;
     }
 
@@ -500,6 +581,46 @@ function handleMessage(client, data) {
       break;
     }
 
+    case 'SET_WHISPER_TARGET': {
+      if (!client.joined) return;
+      const targetClientId = data.targetClientId || null;
+      const targetCharacterId = data.targetCharacterId || null;
+
+      if (!targetClientId && !targetCharacterId) {
+        client.whisperTargetClientId = null;
+        client.whisperTargetCharacterId = null;
+        sendJson(client.ws, {
+          type: 'SELF_WHISPER_UPDATED',
+          targetClientId: null,
+          targetCharacterId: null,
+          targetName: null
+        });
+        broadcastPeerLanguageUpdate(client);
+        break;
+      }
+
+      const targetPeer = targetClientId ? clients.get(targetClientId) : null;
+      const targetChar = targetCharacterId
+        ? getCharacterById(targetCharacterId)
+        : (targetPeer ? getClientCharacter(targetPeer) : null);
+
+      client.whisperTargetClientId = targetPeer ? targetPeer.id : targetClientId;
+      client.whisperTargetCharacterId = targetChar ? targetChar.id : targetCharacterId;
+
+      const targetName = targetPeer?.role === 'dm'
+        ? 'Майстер (ГМ)'
+        : (targetChar ? targetChar.name : 'Обраний гравець');
+
+      sendJson(client.ws, {
+        type: 'SELF_WHISPER_UPDATED',
+        targetClientId: client.whisperTargetClientId,
+        targetCharacterId: client.whisperTargetCharacterId,
+        targetName
+      });
+      broadcastPeerLanguageUpdate(client);
+      break;
+    }
+
     case 'CHAT_MESSAGE': {
       if (!client.joined) return;
       const rawText = String(data.text || '').trim();
@@ -508,6 +629,16 @@ function handleMessage(client, data) {
       const char = getClientCharacter(client);
       const requestedLangId = data.languageId || client.activeLanguageId || 'common';
       const langId = canSpeak(client.role, char, requestedLangId) ? requestedLangId : 'common';
+
+      const wClientId = client.whisperTargetClientId || null;
+      const wCharId = data.whisperTargetCharacterId || client.whisperTargetCharacterId || null;
+      const isWhisper = !!(wClientId || wCharId);
+      let whisperTargetName = null;
+      if (isWhisper) {
+        const wPeer = wClientId ? clients.get(wClientId) : null;
+        const wChar = wCharId ? getCharacterById(wCharId) : (wPeer ? getClientCharacter(wPeer) : null);
+        whisperTargetName = wPeer?.role === 'dm' ? 'Майстер (ГМ)' : (wChar ? wChar.name : 'Співрозмовник');
+      }
 
       const msg = {
         id: crypto.randomUUID(),
@@ -524,16 +655,21 @@ function handleMessage(client, data) {
         seed: Math.floor(Math.random() * 1000000) + 1,
         revealMap: {},
         translatedForParty: false,
-        translatedBy: null
+        translatedBy: null,
+        isWhisper,
+        whisperTargetClientId: wClientId,
+        whisperTargetCharacterId: wCharId,
+        whisperTargetName
       };
 
       messages.push(msg);
       if (messages.length > 150) {
         messages.shift();
       }
+      saveState();
 
       for (const recipient of clients.values()) {
-        if (recipient.joined) {
+        if (recipient.joined && canSeeMessage(msg, recipient)) {
           sendJson(recipient.ws, {
             type: 'CHAT_MESSAGE_NEW',
             message: projectMessageForListener(msg, recipient)
@@ -551,9 +687,10 @@ function handleMessage(client, data) {
       const targetCharId = data.characterId || 'ALL';
       const percent = [0, 25, 50, 100].includes(Number(data.percent)) ? Number(data.percent) : 0;
       msg.revealMap[targetCharId] = percent;
+      saveState();
 
       for (const recipient of clients.values()) {
-        if (recipient.joined) {
+        if (recipient.joined && canSeeMessage(msg, recipient)) {
           sendJson(recipient.ws, {
             type: 'CHAT_MESSAGE_UPDATED',
             message: projectMessageForListener(msg, recipient)
@@ -575,9 +712,10 @@ function handleMessage(client, data) {
 
       msg.translatedForParty = true;
       msg.translatedBy = client.role === 'dm' ? 'Майстер (ГМ)' : (char ? char.name : 'Гравець');
+      saveState();
 
       for (const recipient of clients.values()) {
-        if (recipient.joined) {
+        if (recipient.joined && canSeeMessage(msg, recipient)) {
           sendJson(recipient.ws, {
             type: 'CHAT_MESSAGE_UPDATED',
             message: projectMessageForListener(msg, recipient)
@@ -593,6 +731,7 @@ function handleMessage(client, data) {
       if (idx < 0) return;
 
       messages.splice(idx, 1);
+      saveState();
       for (const recipient of clients.values()) {
         if (recipient.joined) {
           sendJson(recipient.ws, {
@@ -607,6 +746,7 @@ function handleMessage(client, data) {
     case 'CLEAR_CHAT': {
       if (!client.joined || client.role !== 'dm') return;
       messages.length = 0;
+      saveState();
       for (const recipient of clients.values()) {
         if (recipient.joined) {
           sendJson(recipient.ws, {
@@ -830,6 +970,54 @@ function handleMessage(client, data) {
       state.characters = state.characters.filter((c) => c.id !== charId);
       saveState();
       broadcastStateSync();
+      break;
+    }
+
+    case 'DM_IMPORT_STATE': {
+      if (!client.joined || client.role !== 'dm') return;
+      const snap = data.snapshot;
+      if (!snap || !Array.isArray(snap.languages) || !Array.isArray(snap.characters)) {
+        sendJson(client.ws, { type: 'ERROR', error: 'Некоректний формат резервної копії.' });
+        return;
+      }
+
+      if (!snap.languages.some((l) => l && l.id === 'common')) {
+        sendJson(client.ws, { type: 'ERROR', error: 'У резервній копії відсутня базова мова Загальна (common).' });
+        return;
+      }
+
+      state.languages = snap.languages;
+      state.characters = snap.characters;
+      messages.length = 0;
+      if (Array.isArray(snap.messages)) {
+        snap.messages.slice(-150).forEach((m) => messages.push(m));
+      }
+      state.messages = messages;
+      saveState();
+      broadcastStateSync();
+      for (const peer of clients.values()) {
+        if (peer.joined) broadcastPeerLanguageUpdate(peer);
+      }
+      sendJson(client.ws, { type: 'IMPORT_SUCCESS' });
+      break;
+    }
+
+    case 'AUDIO_RELAY_CHUNK': {
+      if (!client.joined || typeof data.pcmBase64 !== 'string' || data.pcmBase64.length > 32768) return;
+      const targetIds = Array.isArray(data.targetClientIds) ? data.targetClientIds : [];
+      const sampleRate = Number(data.sampleRate) || 16000;
+
+      for (const targetId of targetIds) {
+        const target = clients.get(targetId);
+        if (!target || !target.joined || target.id === client.id) continue;
+        if (!isWhisperAllowed(client, target)) continue;
+        sendJson(target.ws, {
+          type: 'AUDIO_RELAY_CHUNK',
+          fromClientId: client.id,
+          pcmBase64: data.pcmBase64,
+          sampleRate
+        });
+      }
       break;
     }
 
