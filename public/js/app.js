@@ -150,6 +150,7 @@
         if (state.role === 'dm') {
           $('dmDashboard').classList.remove('hidden');
           $('dmHandoutControls').classList.remove('hidden');
+          $('clearChatBtn').classList.remove('hidden');
         }
 
         renderIdentityHeader();
@@ -256,6 +257,22 @@
         }
         break;
       }
+
+      case 'CHAT_MESSAGE_DELETED':
+        state.messages = state.messages.filter((m) => m.id !== msg.messageId);
+        if (state.activeHandoutMsgId === msg.messageId) {
+          state.activeHandoutMsgId = null;
+          $('handoutModal').classList.add('hidden');
+        }
+        renderChatMessages();
+        break;
+
+      case 'CHAT_CLEARED':
+        state.messages = [];
+        state.activeHandoutMsgId = null;
+        $('handoutModal').classList.add('hidden');
+        renderChatMessages();
+        break;
 
       case 'WEBRTC_OFFER':
         await handleWebRtcOffer(msg.fromClientId, msg.payload);
@@ -503,13 +520,36 @@
     updateActiveLanguageVisuals();
   }
 
+  const ALTAR_RUNE_SAMPLES = {
+    common: '',
+    elvish: 'αεληθ ωλψ',
+    runic: 'ᚠᚢᚦᚨ ᚱᚲᚷᚹ',
+    infernal: 'ΨΩ∆ ‡ѮѲ',
+    draconic: 'ΔΛΣ ᚠᚲᛉ',
+    druidic: 'ᚠᚦ❦ ✿ᛟ',
+    alien: '⊗⊕◈ ⌖⌗',
+    ancient: 'ΑΒΓѢ ѦѮѰ',
+    imperial: '⚙⌖⌬ §0F',
+    steppe: 'ҚҒҢ ӨӘҖ',
+    cipher: '†‡§ ◊※'
+  };
+
   function updateActiveLanguageVisuals() {
-    const lang = getLanguage(state.activeLanguageId) || { id: 'common', name: 'Загальна', icon: '🗣️', color: '#e2e8f0' };
+    const lang = getLanguage(state.activeLanguageId) || { id: 'common', name: 'Загальна', icon: '🗣️', color: '#c89d54', scriptStyle: 'common' };
     const shell = $('appShell');
     const isForeign = lang.id !== 'common';
+    const accentColor = isForeign ? lang.color : '#c89d54';
 
-    shell.style.setProperty('--active-lang-color', lang.color);
+    shell.style.setProperty('--active-lang-color', accentColor);
     shell.classList.toggle('foreign-lang-active', isForeign);
+
+    $('altarSealIcon').textContent = lang.icon;
+    $('altarLangName').textContent = lang.name;
+    $('altarRuneSample').textContent = ALTAR_RUNE_SAMPLES[lang.scriptStyle] || '';
+    $('altarStatusText').textContent = isForeign
+      ? 'Непосвячені чують лише тарабарщину та бачать рунічний шифр'
+      : 'Голос звучить вільно — вас розуміють усі присутні';
+    $('altarResetBtn').classList.toggle('hidden', !isForeign);
 
     const banner = $('activeLangBanner');
     banner.classList.toggle('hidden', !isForeign);
@@ -517,7 +557,7 @@
     $('activeLangBannerName').textContent = lang.name;
 
     $('chatWritingLangBadge').textContent = `${lang.icon} ${lang.name}`;
-    $('chatWritingLangBadge').style.borderColor = lang.color;
+    $('chatWritingLangBadge').style.borderColor = accentColor;
 
     if (!state.isBuilderPreviewing) {
       audioEngine.updateSelfLanguagePreset(lang);
@@ -525,6 +565,7 @@
   }
 
   $('resetToCommonBtn').addEventListener('click', () => selectActiveLanguage('common'));
+  $('altarResetBtn').addEventListener('click', () => selectActiveLanguage('common'));
 
   function renderLanguagePanel() {
     const container = $('languageButtonsContainer');
@@ -961,6 +1002,12 @@
   });
 
   // -------------------- RUNIC CHAT & HANDOUTS --------------------
+  $('clearChatBtn').addEventListener('click', () => {
+    if (confirm('Очистити всю хроніку повідомлень?')) {
+      wsSend({ type: 'CLEAR_CHAT' });
+    }
+  });
+
   $('isHandoutCheck').addEventListener('change', (e) => {
     $('handoutTitleInput').classList.toggle('hidden', !e.target.checked);
   });
@@ -1057,7 +1104,7 @@
         hasControls = true;
         const openBtn = document.createElement('button');
         openBtn.type = 'button';
-        openBtn.className = 'btn btn-sm btn-gold';
+        openBtn.className = 'btn btn-sm btn-brass';
         openBtn.textContent = '📜 Відкрити Свиток';
         openBtn.addEventListener('click', () => openHandoutModal(msg));
         controls.appendChild(openBtn);
@@ -1069,7 +1116,7 @@
         hasControls = true;
         const transBtn = document.createElement('button');
         transBtn.type = 'button';
-        transBtn.className = 'btn btn-sm btn-accent';
+        transBtn.className = 'btn btn-sm btn-arcane';
         transBtn.textContent = '🗣️ Перекласти групі';
         transBtn.addEventListener('click', () => {
           wsSend({ type: 'TRANSLATE_FOR_PARTY', messageId: msg.id });
@@ -1116,6 +1163,19 @@
         });
       }
 
+      if (state.role === 'dm') {
+        hasControls = true;
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'btn btn-sm btn-danger chat-msg-delete-btn';
+        delBtn.textContent = '🗑️ Видалити';
+        delBtn.title = 'Видалити повідомлення з хроніки для всіх';
+        delBtn.addEventListener('click', () => {
+          wsSend({ type: 'DELETE_MESSAGE', messageId: msg.id });
+        });
+        controls.appendChild(delBtn);
+      }
+
       if (!hasControls) {
         controls.remove();
       }
@@ -1150,12 +1210,21 @@
     actions.innerHTML = '';
     if (msg.understood && !msg.translatedForParty && msg.languageId !== 'common') {
       const btn = document.createElement('button');
-      btn.className = 'btn btn-accent';
+      btn.className = 'btn btn-arcane';
       btn.textContent = '🗣️ Поділитися перекладом з групою';
       btn.addEventListener('click', () => {
         wsSend({ type: 'TRANSLATE_FOR_PARTY', messageId: msg.id });
       });
       actions.appendChild(btn);
+    }
+    if (state.role === 'dm') {
+      const delBtn = document.createElement('button');
+      delBtn.className = 'btn btn-danger';
+      delBtn.textContent = '🗑️ Видалити напис';
+      delBtn.addEventListener('click', () => {
+        wsSend({ type: 'DELETE_MESSAGE', messageId: msg.id });
+      });
+      actions.appendChild(delBtn);
     }
   }
 

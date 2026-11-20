@@ -3,43 +3,49 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Feria Polyglot — Мовна система для D&D</title>
+  <title>Feria Polyglot — Кодекс Мов Ферії</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,600;0,700;1,500&family=Golos+Text:wght@400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/css/styles.css" />
 </head>
 <body>
   <!-- Lobby / Character Selection Modal -->
   <div id="lobbyOverlay" class="overlay">
-    <div class="lobby-modal">
+    <div class="lobby-modal codex-surface">
       <div class="lobby-header">
-        <div class="brand-crest">⚔️</div>
+        <div class="brand-crest" aria-hidden="true">⚔️</div>
         <div>
           <h1>Feria Polyglot</h1>
-          <p class="subtitle">Голосова та рунічна система мов для вашої D&D-кампанії</p>
+          <p class="subtitle">Магічний кодекс мов, шепоту та рунічних свитків світу Ферії</p>
         </div>
       </div>
 
       <div id="lobbyError" class="alert-error hidden"></div>
 
       <section class="lobby-section">
-        <h2>Оберіть свого героя</h2>
+        <div class="section-heading">
+          <h2>Оберіть свого героя</h2>
+          <p class="section-lead">Натисніть на печатку персонажа, щоб увійти до голосової зали</p>
+        </div>
         <div id="lobbyCharacters" class="lobby-char-grid">
           <!-- Populated via /api/lobby -->
         </div>
       </section>
 
-      <div class="lobby-divider"><span>або</span></div>
+      <div class="codex-rule"><span>або</span></div>
 
       <section class="lobby-section dm-login-box">
         <div class="dm-login-info">
-          <span class="dm-crown">👑</span>
+          <span class="dm-crown" aria-hidden="true">👑</span>
           <div>
-            <h3>Вхід для Майстра (ГМ)</h3>
-            <p class="hint">Повний контроль мов, магічних станів, написів та діалогів. (Локальний PIN: <code>1250</code>)</p>
+            <h3>Місце Майстра (ГМ)</h3>
+            <p class="hint">Керування мовами світу, заклинаннями, свитками та хронікою. Локальний код: <code>1250</code></p>
           </div>
         </div>
         <form id="dmLoginForm" class="dm-login-form">
-          <input id="dmPinInput" type="password" placeholder="PIN Майстра" autocomplete="off" />
-          <button type="submit" class="btn btn-gold">Увійти як Майстер</button>
+          <input id="dmPinInput" type="password" placeholder="Код Майстра" autocomplete="off" />
+          <button type="submit" class="btn btn-brass">Увійти як Майстер</button>
         </form>
       </section>
     </div>
@@ -63,9 +69,9 @@
 
   <!-- Language Constructor Modal (DM only) -->
   <div id="langBuilderModal" class="overlay hidden">
-    <div class="builder-modal">
+    <div class="builder-modal codex-surface">
       <div class="builder-header">
-        <h2 id="langBuilderHeading">✨ Конструктор мови / шифру Ферії</h2>
+        <h2 id="langBuilderHeading">Конструктор мови чи шифру Ферії</h2>
         <button id="closeLangBuilder" class="btn btn-ghost btn-sm">✕</button>
       </div>
       <form id="langBuilderForm" class="builder-form">
@@ -74,7 +80,7 @@
           <label>Назва мови
             <input type="text" id="lbName" required placeholder="Напр. Мова Тіньового Пророка" />
           </label>
-          <label>Категорія
+          <label>Походження
             <select id="lbCategory">
               <option value="feria">Світ Ферії</option>
               <option value="standard">Стандартна D&amp;D</option>
@@ -83,13 +89,13 @@
           </label>
         </div>
         <div class="form-row three-col">
-          <label>Іконка (Емодзі)
+          <label>Символ
             <input type="text" id="lbIcon" value="🕯️" maxlength="4" />
           </label>
-          <label>Колір
-            <input type="color" id="lbColor" value="#c084fc" />
+          <label>Барва
+            <input type="color" id="lbColor" value="#c89d54" />
           </label>
-          <label>Стиль рун у чаті
+          <label>Писемність у хроніці
             <select id="lbScriptStyle">
               <option value="ancient">Давній Кірос (ΑΒΓѢѦ)</option>
               <option value="elvish">Ельфійська в'язь (αεηθλ)</option>
@@ -107,8 +113,8 @@
 
         <div class="dsp-sliders-box">
           <div class="dsp-sliders-top">
-            <h3>🎛️ Акустичний DSP-профіль тарабарщини</h3>
-            <button type="button" id="lbTestVoiceBtn" class="btn btn-sm btn-accent">
+            <h3>Акустичний DSP-профіль тарабарщини</h3>
+            <button type="button" id="lbTestVoiceBtn" class="btn btn-sm btn-arcane">
               🎧 Послухати через мій мікрофон
             </button>
           </div>
@@ -157,7 +163,7 @@
           <button type="button" id="lbDeleteBtn" class="btn btn-danger hidden">Видалити мову</button>
           <div class="builder-footer-right">
             <button type="button" id="lbCancelBtn" class="btn btn-ghost">Скасувати</button>
-            <button type="submit" class="btn btn-gold">💾 Зберегти мову</button>
+            <button type="submit" class="btn btn-brass">Зберегти мову</button>
           </div>
         </div>
       </form>
@@ -167,7 +173,7 @@
   <!-- Main Workspace -->
   <div id="appShell" class="app-shell hidden">
     <!-- Top Audio & Self-Test Bar -->
-    <header class="topbar">
+    <header class="topbar codex-bar">
       <div class="topbar-left">
         <div class="identity-pill">
           <span id="myAvatarIcon" class="identity-icon">🛡️</span>
@@ -181,7 +187,7 @@
 
       <div class="topbar-controls">
         <div class="mic-group">
-          <button id="micToggleBtn" class="btn btn-mic" title="Увімкнути / Вимкнути мікрофон">
+          <button id="micToggleBtn" class="btn btn-mic" title="Увімкнути або вимкнути мікрофон">
             <span id="micBtnIcon">🎙️</span>
             <span id="micBtnLabel">Мікрофон</span>
           </button>
@@ -193,14 +199,14 @@
           </select>
         </div>
 
-        <label class="toggle-pill" title="Ті, хто знає мову, чують розбірливий голос з легким тематичним забарвленням">
+        <label class="toggle-pill" title="Ті, хто знає мову, чують розбірливий голос із легким тематичним забарвленням">
           <input type="checkbox" id="atmosphericToggle" checked />
           <span>✨ Атмосферний тембр</span>
         </label>
 
         <div class="self-monitor-group">
           <button id="selfMonitorBtn" class="btn btn-ghost btn-sm" title="Почути свій власний голос у навушниках">
-            🎧 Тест свого голосу
+            🎧 Тест голосу
           </button>
           <select id="selfMonitorMode" class="select-compact hidden" title="Режим самопрослуховування">
             <option value="gibberish">Чути як Тарабарщину</option>
@@ -208,7 +214,7 @@
           </select>
         </div>
 
-        <button id="switchCharBtn" class="btn btn-ghost btn-sm" title="Змінити персонажа">🔄 Вийти</button>
+        <button id="switchCharBtn" class="btn btn-ghost btn-sm" title="Повернутися до вибору персонажа">Вийти</button>
       </div>
     </header>
 
@@ -216,27 +222,40 @@
     <div id="activeLangBanner" class="active-lang-banner hidden">
       <div class="active-lang-banner-text">
         <span id="activeLangBannerIcon">🌿</span>
-        <span>Ви зараз говорите мовою: <strong id="activeLangBannerName">Ельфійська</strong></span>
+        <span>Зараз звучить мова: <strong id="activeLangBannerName">Ельфійська</strong></span>
       </div>
-      <button id="resetToCommonBtn" class="btn btn-sm btn-light">🗣️ Повернутися на Загальну</button>
+      <button id="resetToCommonBtn" class="btn btn-sm btn-light">Повернутися на Загальну</button>
     </div>
 
     <!-- Smart Reply Prompt Banner -->
     <div id="replyPromptBanner" class="reply-prompt-banner hidden">
-      <div id="replyPromptText">🔔 До вас звертаються мовою!</div>
+      <div id="replyPromptText">До вас звертаються мовою!</div>
       <div class="reply-prompt-actions">
-        <button id="replyPromptAcceptBtn" class="btn btn-sm btn-gold">🗣️ Перемкнутися і відповісти цією мовою</button>
+        <button id="replyPromptAcceptBtn" class="btn btn-sm btn-brass">Перемкнутися і відповісти цією мовою</button>
         <button id="replyPromptDismissBtn" class="btn btn-sm btn-ghost">✕</button>
       </div>
     </div>
 
-    <!-- Main 2-Column Layout -->
+    <!-- Main 2-Column Codex Layout -->
     <main class="workspace-grid">
       <div class="left-column">
-        <!-- Language Switcher Panel -->
+        <!-- Language Resonator & Switcher Panel -->
         <section class="panel language-panel">
+          <!-- Focal Centerpiece: Active Tongue Altar -->
+          <div id="activeTongueAltar" class="tongue-altar">
+            <div class="altar-seal" id="altarSealIcon">🗣️</div>
+            <div class="altar-info">
+              <div class="altar-title-row">
+                <h2 id="altarLangName">Загальна</h2>
+                <span id="altarRuneSample" class="altar-rune-sample"></span>
+              </div>
+              <p id="altarStatusText" class="altar-status">Голос звучить вільно — вас розуміють усі присутні</p>
+            </div>
+            <button id="altarResetBtn" type="button" class="btn btn-sm btn-ghost hidden">На Загальну</button>
+          </div>
+
           <div class="panel-header">
-            <h2>🗣️ Активна мова мовлення</h2>
+            <h3>Доступні мови</h3>
             <span id="hoverUnderstandHint" class="hover-hint"></span>
           </div>
           <div id="languageButtonsContainer" class="language-groups">
@@ -247,8 +266,8 @@
         <!-- Voice Room Participants -->
         <section class="panel peers-panel">
           <div class="panel-header">
-            <h2>🎙️ Голосова кімната (<span id="onlineCount">1</span>)</h2>
-            <span class="sub-hint">Невідомі мови автоматично спотворюються та приховують свою назву</span>
+            <h2>Голосова зала (<span id="onlineCount">1</span>)</h2>
+            <span class="sub-hint">Невідомі мови спотворюються наживо та приховують свою назву</span>
           </div>
           <div id="peersGrid" class="peers-grid">
             <!-- Self + Remote Peer Cards -->
@@ -258,10 +277,10 @@
         <!-- DM Dashboard (Only visible for DM) -->
         <section id="dmDashboard" class="panel dm-panel hidden">
           <div class="panel-header">
-            <h2>👑 Панель Майстра (Керування кампанією)</h2>
+            <h2>Панель Майстра</h2>
             <div class="dm-header-actions">
-              <button id="resetAllDialoguesBtn" class="btn btn-ghost btn-sm">🔓 Скинути всі діалоги</button>
-              <button id="openLangBuilderBtn" class="btn btn-gold btn-sm">+ Створити мову / шифр</button>
+              <button id="resetAllDialoguesBtn" class="btn btn-ghost btn-sm">Скинути всі діалоги</button>
+              <button id="openLangBuilderBtn" class="btn btn-brass btn-sm">+ Нова мова / шифр</button>
             </div>
           </div>
 
@@ -271,24 +290,31 @@
 
           <form id="dmAddCharForm" class="dm-add-char-form">
             <input type="text" id="newCharName" placeholder="Ім'я нового героя" required />
-            <input type="text" id="newCharTitle" placeholder="Титул / Клас" />
+            <input type="text" id="newCharTitle" placeholder="Титул або клас" />
             <input type="text" id="newCharIcon" value="🛡️" maxlength="4" class="input-icon" />
-            <input type="color" id="newCharColor" value="#38bdf8" class="input-color" />
-            <button type="submit" class="btn btn-sm btn-accent">+ Додати героя</button>
+            <input type="color" id="newCharColor" value="#c89d54" class="input-color" />
+            <button type="submit" class="btn btn-sm btn-arcane">+ Додати героя</button>
           </form>
         </section>
       </div>
 
-      <!-- Right Column: Runic Chat & Handouts -->
+      <!-- Right Column: Runic Chronicle & Handouts -->
       <aside class="right-column panel chat-panel">
-        <div class="panel-header">
-          <h2>📜 Рунічний Чат та Написи</h2>
-          <span id="chatWritingLangBadge" class="lang-badge">🗣️ Загальна</span>
+        <div class="panel-header chat-panel-header">
+          <div>
+            <h2>Хроніка та Рунічні Написи</h2>
+          </div>
+          <div class="chat-header-tools">
+            <span id="chatWritingLangBadge" class="lang-badge">🗣️ Загальна</span>
+            <button id="clearChatBtn" type="button" class="btn btn-sm btn-danger hidden" title="Очистити всю хроніку повідомлень">
+              🗑️ Очистити хроніку
+            </button>
+          </div>
         </div>
 
         <div id="chatMessages" class="chat-messages">
           <div class="chat-empty-state">
-            Повідомлення та древні написи з'являться тут. Текст шифрується на сервері залежно від мови мовця!
+            Записи з'являться тут. Текст шифрується на сервері залежно від обраної мови мовця.
           </div>
         </div>
 
@@ -296,13 +322,13 @@
           <div id="dmHandoutControls" class="dm-handout-controls hidden">
             <label class="checkbox-inline">
               <input type="checkbox" id="isHandoutCheck" />
-              <span>📜 Надіслати як Древній Свиток / Напис (Handout)</span>
+              <span>📜 Надіслати як Древній Свиток або напис</span>
             </label>
             <input type="text" id="handoutTitleInput" class="hidden" placeholder="Заголовок напису (напр. Обеліск у трюмі)" />
           </div>
           <div class="chat-input-row">
-            <textarea id="chatInput" rows="2" placeholder="Напишіть фразу обраною мовою або текст напису..."></textarea>
-            <button type="submit" class="btn btn-gold">Надіслати</button>
+            <textarea id="chatInput" rows="2" placeholder="Записати фразу обраною мовою або текст напису..."></textarea>
+            <button type="submit" class="btn btn-brass">Записати</button>
           </div>
         </form>
       </aside>

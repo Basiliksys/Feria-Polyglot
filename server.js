@@ -587,6 +587,36 @@ function handleMessage(client, data) {
       break;
     }
 
+    case 'DELETE_MESSAGE': {
+      if (!client.joined || client.role !== 'dm') return;
+      const idx = messages.findIndex((m) => m.id === data.messageId);
+      if (idx < 0) return;
+
+      messages.splice(idx, 1);
+      for (const recipient of clients.values()) {
+        if (recipient.joined) {
+          sendJson(recipient.ws, {
+            type: 'CHAT_MESSAGE_DELETED',
+            messageId: data.messageId
+          });
+        }
+      }
+      break;
+    }
+
+    case 'CLEAR_CHAT': {
+      if (!client.joined || client.role !== 'dm') return;
+      messages.length = 0;
+      for (const recipient of clients.values()) {
+        if (recipient.joined) {
+          sendJson(recipient.ws, {
+            type: 'CHAT_CLEARED'
+          });
+        }
+      }
+      break;
+    }
+
     case 'DM_FORCE_DIALOGUE': {
       if (!client.joined || client.role !== 'dm') return;
       const targetChar = getCharacterById(data.characterId);
