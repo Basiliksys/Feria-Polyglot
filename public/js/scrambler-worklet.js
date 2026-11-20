@@ -94,8 +94,11 @@ class PolyglotScramblerProcessor extends AudioWorkletProcessor {
     const pScale = Math.max(0.72, Math.min(1.38, pitchRatio));
     this.targetF1 = pair[0] * pScale;
     this.targetF2 = pair[1] * pScale;
-    this.burstEnv = 1.0;
-    this.syllableCooldown = Math.round(0.085 * sampleRate);
+    // Keep a soft breathy onset instead of a bright click/knock. The old
+    // full-scale white-noise burst dominated low-pitched presets (Dwarvish,
+    // Infernal) and made every vowel sound like a percussion hit.
+    this.burstEnv = 0.4;
+    this.syllableCooldown = Math.round(0.12 * sampleRate);
   }
 
   resetGrain(grain, grainLen, pitchRatio) {
@@ -233,9 +236,9 @@ class PolyglotScramblerProcessor extends AudioWorkletProcessor {
         let cons = 0;
         if (this.burstEnv > 0.005) {
           const white = this.nextRand() * 2 - 1;
-          this.consLp = this.consLp * 0.45 + white * 0.55;
-          cons = (white - this.consLp) * this.burstEnv * Math.min(0.4, this.fastEnv * 2.2);
-          this.burstEnv *= 0.9985;
+          this.consLp = this.consLp * 0.55 + white * 0.45;
+          cons = (white - this.consLp) * this.burstEnv * Math.min(0.16, this.fastEnv * 1.3);
+          this.burstEnv *= 0.9992;
         }
 
         // Full formant-morphed synthetic syllable driven by speaker cadence

@@ -2,6 +2,11 @@
 
 const fs = require('fs');
 const path = require('path');
+const {
+  LEGACY_DSP_PRESETS,
+  NATURAL_DSP_PRESETS,
+  presetEquals
+} = require('./dsp-presets');
 
 // Rune / glyph alphabets per scriptStyle using widely supported Unicode characters
 const SCRIPT_ALPHABETS = {
@@ -127,6 +132,18 @@ function normalizeDspPreset(preset) {
   return result;
 }
 
+/** Upgrades untouched built-in presets while preserving DM customisations. */
+function resolveDspPreset(id, preset) {
+  const normalized = normalizeDspPreset(preset);
+  const next = NATURAL_DSP_PRESETS[id];
+  if (!next) return normalized;
+  const legacy = LEGACY_DSP_PRESETS[id];
+  if (legacy && presetEquals(normalized, normalizeDspPreset(legacy))) {
+    return normalizeDspPreset(next);
+  }
+  return normalized;
+}
+
 /**
  * Validates and clamps any state coming from disk, KV or a DM backup so that
  * malformed data can never break projection or crash a connected client.
@@ -148,7 +165,7 @@ function normalizeState(raw) {
       color: safeColor(lang.color, '#c084fc'),
       icon: sanitizeGlyph(lang.icon, id, '✦'),
       scriptStyle: SCRIPT_ALPHABETS[lang.scriptStyle] ? lang.scriptStyle : 'ancient',
-      dspPreset: normalizeDspPreset(lang.dspPreset)
+      dspPreset: resolveDspPreset(id, lang.dspPreset)
     });
   }
   if (!languageIds.has('common')) {
@@ -482,6 +499,9 @@ module.exports = {
   safeColor,
   safeId,
   normalizeDspPreset,
+  resolveDspPreset,
+  NATURAL_DSP_PRESETS,
+  LEGACY_DSP_PRESETS,
   normalizeState,
   CampaignStore
 };

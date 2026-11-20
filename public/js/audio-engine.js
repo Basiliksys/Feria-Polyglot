@@ -28,6 +28,8 @@ class PolyglotAudioEngine {
     this.localVadTimer = null;
     this.localGateOpen = false;
     this.gateHoldUntil = 0;
+    this.noiseFloor = 0.0015;
+    this.aboveGateFrames = 0;
 
     // Relay capture node (AudioWorklet tap, replaces ScriptProcessorNode)
     this.relayTap = null;
@@ -534,7 +536,11 @@ class PolyglotAudioEngine {
 
     this.localDest = ctx.createMediaStreamDestination();
     this.localAnalyser = ctx.createAnalyser();
-    this.localAnalyser.fftSize = 512;
+    // ~43 ms at 48 kHz instead of ~10 ms: enough context to tell a sustained
+    // syllable from a 5 ms keyboard/mouse impulse.
+    this.localAnalyser.fftSize = 2048;
+    this.noiseFloor = 0.0015;
+    this.aboveGateFrames = 0;
 
     this.localSource.connect(this.localHpFilter);
     this.localHpFilter.connect(this.localLpFilter);
@@ -598,15 +604,37 @@ class PolyglotAudioEngine {
         if (av > peak) peak = av;
       }
       const rms = Math.sqrt(sum / data.length);
+      const crest = peak / Math.max(rms, 1e-6);
       const level = Math.min(1, rms * 8);
       const now = Date.now();
 
-      // Speech activity drives both the UI indicator and the outgoing gate.
-      // Browser noise suppression is still the first line of defence; this
-      // removes the remaining room/keyboard floor in the pauses between words.
-      if (rms >= this.noiseGateThreshold || peak >= this.noiseGateThreshold * 1.8) {
-        this.gateHoldUntil = now + 420;
-        this.lastSpeakingAt = now;
+      // Discord-like gating: learn the quietest recent level, use hysteresis
+      // around it, and reject short broadband impulses. Browser noise
+      // suppression handles steady hiss; this removes the clicks it misses.
+      if (rms < this.noiseFloor) {
+        this.noiseFloor = this.noiseFloor * 0.85 + rms * 0.15;
+      } else if (!this.localGateOpen) {
+        this.noiseFloor = Math.min(rms, this.noiseFloor * 1.002);
+      }
+      const openThreshold = Math.max(this.noiseGateThreshold, this.noiseFloor * 3);
+      const closeThreshold = Math.max(this.noiseGateThreshold * 0.55, this.noiseFloor * 1.7);
+      const isTransient = crest > 12 || (peak > openThreshold * 8 && rms < openThreshold);
+      const above = rms >= openThreshold && !isTransient;
+
+      if (above) {
+        this.aboveGateFrames++;
+        // A single strong frame can be speech; a weak one must persist for two
+        // ticks (~40 ms) so one keyboard click cannot open the gate.
+        if (this.aboveGateFrames >= 2 || rms >= openThreshold * 2.5) {
+          this.gateHoldUntil = now + 420;
+          this.lastSpeakingAt = now;
+        }
+      } else {
+        this.aboveGateFrames = 0;
+        if (this.localGateOpen && rms >= closeThreshold && !isTransient) {
+          this.gateHoldUntil = now + 420;
+          this.lastSpeakingAt = now;
+        }
       }
 
       const gateOpenNow = now < this.gateHoldUntil;
@@ -660,6 +688,8 @@ class PolyglotAudioEngine {
     this.gatedLocalStream = null;
     this.localGateOpen = false;
     this.gateHoldUntil = 0;
+    this.noiseFloor = 0.0015;
+    this.aboveGateFrames = 0;
   }
 
   setRelayTargetsCount(count) {

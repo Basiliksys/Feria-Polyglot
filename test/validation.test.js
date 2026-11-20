@@ -10,6 +10,9 @@ test('validateWsMessage accepts well-formed messages', () => {
   assert.equal(validateWsMessage({ type: 'JOIN', role: 'player', characterId: 'liora' }), null);
   assert.equal(validateWsMessage({ type: 'JOIN', role: 'player', characterId: 'liora', relayProtocol: 2 }), null);
   assert.equal(validateWsMessage({ type: 'CHAT_MESSAGE', text: 'Привіт', languageId: 'elvish' }), null);
+  // The browser client used to send title: '' for every ordinary message.
+  assert.equal(validateWsMessage({ type: 'CHAT_MESSAGE', text: 'Привіт', title: '' }), null);
+  assert.equal(validateWsMessage({ type: 'CHAT_MESSAGE', text: 'Привіт', title: 'Свиток' }), null);
   assert.equal(validateWsMessage({
     type: 'AUDIO_RELAY_CHUNK',
     pcmBase64: 'AAAA',
@@ -24,6 +27,7 @@ test('validateWsMessage rejects malformed and oversized payloads', () => {
   assert.match(validateWsMessage({ type: 'NOPE' }), /Unknown/);
   assert.match(validateWsMessage({ type: 'CHAT_MESSAGE', text: 'x'.repeat(4001) }), /text/);
   assert.match(validateWsMessage({ type: 'CHAT_MESSAGE', text: '' }), /text/);
+  assert.match(validateWsMessage({ type: 'CHAT_MESSAGE', text: 'x', title: 'т'.repeat(201) }), /title/);
   assert.match(validateWsMessage({ type: 'JOIN', role: 'dm' }), /PIN/);
   assert.match(validateWsMessage({ type: 'JOIN', role: 'player', characterId: 'liora', relayProtocol: 3 }), /relayProtocol/);
   assert.match(validateWsMessage({

@@ -119,6 +119,10 @@ class FakeAudioContext {
     const node = new FakeNode(this, 'analyser');
     node.fftSize = 512;
     node.getFloatTimeDomainData = (array) => {
+      if (typeof this.testFrame === 'function') {
+        this.testFrame(array);
+        return;
+      }
       const sample = this.testSample || 0;
       for (let i = 0; i < array.length; i++) array[i] = sample;
     };
@@ -297,6 +301,38 @@ test('voice activity gates the outgoing stream and the self-monitor preview', as
     assert.equal(engine.localGateGain.gain.value, 0);
   } finally {
     await engine.enableSelfMonitor(false);
+    engine.teardownLocalPipeline();
+  }
+});
+
+test('short keyboard/mouse clicks do not open the noise gate', async () => {
+  const engine = createEngine();
+  await engine.ensureInitialized();
+  engine.ctx.testSample = 0.002;
+  const rawStream = { getAudioTracks: () => [{ enabled: true }] };
+  await engine.setLocalStream(rawStream);
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(engine.localGateOpen, false);
+
+    // A 2-sample impulse repeated every tick: high peak, very low average
+    // energy. Looks loud to a peak detector but is not speech.
+    engine.ctx.testFrame = (array) => {
+      array.fill(0.002);
+      array[0] = 0.9;
+      array[1] = -0.9;
+    };
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(engine.localGateOpen, false, 'transients are rejected');
+    assert.equal(engine.aboveGateFrames, 0);
+
+    // Sustained voiced audio still opens the gate promptly.
+    engine.ctx.testFrame = (array) => array.fill(0.08);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(engine.localGateOpen, true);
+  } finally {
+    engine.ctx.testFrame = null;
     engine.teardownLocalPipeline();
   }
 });

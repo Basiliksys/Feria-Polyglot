@@ -84,6 +84,16 @@ test('relay tap is registered and encodes transferable PCM only while enabled', 
   assert.equal(tap.port.messages.length, before);
 });
 
+test('syllable onset uses a soft breath instead of a loud click', () => {
+  const { registered, sandbox } = loadProcessors();
+  const Scrambler = registered['polyglot-scrambler-processor'];
+  const proc = new Scrambler();
+
+  proc.triggerSyllableMorph(1);
+  assert.equal(proc.burstEnv, 0.4, 'onset burst is attenuated');
+  assert.ok(proc.syllableCooldown >= 0.12 * sandbox.sampleRate, 'onsets are spaced further apart');
+});
+
 test('relay tap fails fast when RelayProtocol is missing', () => {
   let captured;
   const sandbox = {

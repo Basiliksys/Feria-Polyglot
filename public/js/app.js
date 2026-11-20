@@ -573,8 +573,10 @@
     try {
       const constraints = {
         audio: deviceId
-          ? { deviceId: { exact: deviceId }, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-          : { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+          // AGC pumps room noise and keyboard clicks up between words, which
+          // defeats a noise gate. Keep browser NS/EC but fix the mic gain.
+          ? { deviceId: { exact: deviceId }, echoCancellation: true, noiseSuppression: true, autoGainControl: false }
+          : { echoCancellation: true, noiseSuppression: true, autoGainControl: false },
         video: false
       };
 
@@ -1745,11 +1747,13 @@
     const isHandout = state.role === 'dm' && $('isHandoutCheck').checked;
     const title = isHandout ? $('handoutTitleInput').value.trim() : '';
 
+    // Omit an empty title entirely: validation treats '' as absent too, but
+    // sending nothing keeps the wire format unambiguous for older servers.
     wsSend({
       type: 'CHAT_MESSAGE',
       text,
       isHandout,
-      title,
+      ...(title ? { title } : {}),
       languageId: state.activeLanguageId
     });
 

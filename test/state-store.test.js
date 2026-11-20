@@ -9,7 +9,9 @@ const path = require('node:path');
 const {
   normalizeState,
   CampaignStore,
-  DEFAULT_COMMON_LANGUAGE
+  DEFAULT_COMMON_LANGUAGE,
+  LEGACY_DSP_PRESETS,
+  NATURAL_DSP_PRESETS
 } = require('../state-store');
 
 function tempDir() {
@@ -43,6 +45,29 @@ test('normalizeState always provides a usable common language', () => {
   assert.deepEqual(state.languages, [DEFAULT_COMMON_LANGUAGE]);
   assert.deepEqual(state.characters, []);
   assert.deepEqual(state.messages, []);
+});
+
+test('normalizeState upgrades legacy presets but keeps DM customisations', () => {
+  const state = normalizeState({
+    languages: [
+      {
+        id: 'dwarvish',
+        name: 'Дворфійська',
+        dspPreset: LEGACY_DSP_PRESETS.dwarvish
+      },
+      {
+        id: 'infernal',
+        name: 'Інфернальна (кастом)',
+        dspPreset: { ...LEGACY_DSP_PRESETS.infernal, reverbMix: 0.77 }
+      }
+    ]
+  });
+
+  const dwarvish = state.languages.find((l) => l.id === 'dwarvish');
+  const infernal = state.languages.find((l) => l.id === 'infernal');
+  assert.deepEqual(dwarvish.dspPreset, NATURAL_DSP_PRESETS.dwarvish);
+  assert.equal(infernal.dspPreset.reverbMix, 0.77, 'custom preset is preserved');
+  assert.equal(infernal.dspPreset.subOctaveMix, LEGACY_DSP_PRESETS.infernal.subOctaveMix);
 });
 
 test('normalizeState clamps, filters and sanitizes hostile input', () => {

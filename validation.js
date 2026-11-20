@@ -78,7 +78,10 @@ function validateWsMessage(data) {
 
     case 'CHAT_MESSAGE':
       if (!boundedText(data.text, 4000)) return 'Invalid text';
-      if (data.title !== undefined && data.title !== null && !boundedText(data.title, 200)) return 'Invalid title';
+      // An empty title means "no heading" (ordinary chat). Older clients send
+      // it as '', so accept it as well as a missing/null title.
+      if (data.title !== undefined && data.title !== null && data.title !== '' &&
+          !boundedText(data.title, 200)) return 'Invalid title';
       if (data.languageId !== undefined && data.languageId !== null && !isId(data.languageId)) return 'Invalid languageId';
       if (data.whisperTargetCharacterId !== undefined && data.whisperTargetCharacterId !== null &&
           !isId(data.whisperTargetCharacterId)) return 'Invalid whisper target';
