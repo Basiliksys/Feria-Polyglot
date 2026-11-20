@@ -12,7 +12,8 @@ services:
     buildCommand: npm ci
     startCommand: npm start
     healthCheckPath: /api/health
-    maxShutdownDelaySeconds: 20 # enough time to flush state on SIGTERM
+    # Free tier uses Render's default graceful-shutdown window;
+    # maxShutdownDelaySeconds is only supported on paid plans.
     autoDeployTrigger: commit
     envVars:
       - key: NODE_VERSION

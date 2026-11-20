@@ -39,7 +39,7 @@
 
 ## Деплой на Render (основний варіант)
 
-Найшвидший шлях — Blueprint `render.yaml` у корені репозиторію: **New → Blueprint**, виберіть репо, введіть три секрети (`FERIA_DM_PIN`, `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`) і застосуйте. Blueprint задає один web-інстанс, `npm ci` / `npm start`, healthcheck `/api/health`, `NODE_ENV=production`, відсутність persistent disk і таймаут graceful shutdown 20 с. **`FERIA_DM_PIN` обов'язковий у production** — без нього сервер не стартує (інакше працював би публічний PIN `1250` з seed-файлу). Якщо безкоштовні web-інстанси недоступні — замініть `plan: free` на `0.5c-512mb`.
+Найшвидший шлях — Blueprint `render.yaml` у корені репозиторію: **New → Blueprint**, виберіть репо, введіть три секрети (`FERIA_DM_PIN`, `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`) і застосуйте. Blueprint задає один web-інстанс, `npm ci` / `npm start`, healthcheck `/api/health`, `NODE_ENV=production` і відсутність persistent disk. **`FERIA_DM_PIN` обов'язковий у production** — без нього сервер не стартує (інакше працював би публічний PIN `1250` з seed-файлу). Якщо безкоштовні web-інстанси недоступні — замініть `plan: free` на `0.5c-512mb`.
 
 ### Налаштування сервісу
 
@@ -48,6 +48,7 @@
 - **Start Command:** `npm start`
 - **Instance Count:** **1**. Реєстр учасників (`clients`) і WebRTC-сигналінг зберігаються у пам'яті процесу; кілька інстансів бачитимуть різні списки гравців. Масштабування потребує окремого pub/sub (не входить у цей етап).
 - **Healthcheck Path:** `/api/health`
+- **Graceful shutdown:** безкоштовний план використовує стандартне вікно Render; `maxShutdownDelaySeconds` підтримується лише на платних планах, тому його немає в Blueprint. Сервер усе одно закриває WS/HTTP і зливає стан при `SIGTERM`.
 
 ### Збереження стану (обов'язково)
 
