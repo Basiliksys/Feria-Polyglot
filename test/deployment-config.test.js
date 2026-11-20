@@ -22,6 +22,7 @@ test('render.yaml declares one web instance, no disk, and the healthcheck', () =
   assert.match(blueprint, /^\s*startCommand:\s*npm start\s*$/m);
   assert.match(blueprint, /^\s*healthCheckPath:\s*\/api\/health\s*$/m);
   assert.match(blueprint, /^\s*numInstances:\s*1\s*$/m);
+  assert.match(blueprint, /^\s*region:\s*frankfurt\s*$/m);
   assert.doesNotMatch(blueprint, /^\s*maxShutdownDelaySeconds:/m, 'unsupported on free tier');
   assert.doesNotMatch(blueprint, /^\s*disk:/m, 'no persistent disk on Render');
   assert.doesNotMatch(blueprint, /^\s*type:\s*(worker|cron)\s*$/m, 'single-process deployment');

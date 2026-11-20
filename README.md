@@ -47,6 +47,7 @@
 - **Build Command:** `npm ci`
 - **Start Command:** `npm start`
 - **Instance Count:** **1**. Реєстр учасників (`clients`) і WebRTC-сигналінг зберігаються у пам'яті процесу; кілька інстансів бачитимуть різні списки гравців. Масштабування потребує окремого pub/sub (не входить у цей етап).
+- **Region:** `frankfurt` (Blueprint). Створюйте Upstash Redis у регіоні **Frankfurt / Central Europe (EU)**, щоб мінімізувати затримку записів стану.
 - **Healthcheck Path:** `/api/health`
 - **Graceful shutdown:** безкоштовний план використовує стандартне вікно Render; `maxShutdownDelaySeconds` підтримується лише на платних планах, тому його немає в Blueprint. Сервер усе одно закриває WS/HTTP і зливає стан при `SIGTERM`.
 
