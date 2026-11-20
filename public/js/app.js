@@ -98,6 +98,56 @@
     }
   }
 
+  const DEFAULT_GLYPHS = {
+    common: '◈',
+    elvish: '❧',
+    dwarvish: 'ᛏ',
+    draconic: 'Δ',
+    infernal: 'Ψ',
+    abyssal: '⸸',
+    druidic: 'ᛉ',
+    primordial: '≈',
+    deep_speech: '◉',
+    celestial: '✦',
+    thieves_cant: '‡',
+    undercommon: '⊘',
+    kiros_ancient: 'Ѫ',
+    niman_cipher: '⌬',
+    steppe_turs: 'ᚱ',
+    amenemhet: '☽',
+    adrian: '†',
+    liora: 'ᛉ',
+    jagatai: 'ᚱ'
+  };
+
+  function sanitizeGlyph(icon, id, fallback = '✦') {
+    const str = String(icon || '').trim();
+    if (!str || /[\u{1F300}-\u{1FAFF}\u2600-\u27BF]/u.test(str)) {
+      return DEFAULT_GLYPHS[id] || fallback;
+    }
+    return str;
+  }
+
+  function sanitizeSnapshotIcons(snap) {
+    if (!snap) return snap;
+    if (Array.isArray(snap.languages)) {
+      snap.languages.forEach((l) => {
+        if (l) l.icon = sanitizeGlyph(l.icon, l.id, '✦');
+      });
+    }
+    if (Array.isArray(snap.characters)) {
+      snap.characters.forEach((c) => {
+        if (c) c.icon = sanitizeGlyph(c.icon, c.id, '❖');
+      });
+    }
+    if (Array.isArray(snap.messages)) {
+      snap.messages.forEach((m) => {
+        if (m) m.senderIcon = sanitizeGlyph(m.senderIcon, m.senderCharacterId, m.senderCharacterId ? '❖' : '♔');
+      });
+    }
+    return snap;
+  }
+
   function getLanguage(langId) {
     return state.languages.find((l) => l.id === langId) || null;
   }
@@ -170,11 +220,23 @@
     };
 
     ws.onclose = () => {
-      if (state.clientId) {
+      if (state.clientId && !state.intentionalLeave) {
         showToast('З’єднання з сервером розірвано. Оновіть сторінку для повторного входу.');
       }
     };
   }
+
+  function sendCleanLeave() {
+    state.intentionalLeave = true;
+    wsSend({ type: 'LEAVE' });
+    if (state.ws) {
+      try { state.ws.close(1000, 'User left'); } catch {}
+    }
+  }
+
+  window.addEventListener('beforeunload', () => {
+    if (state.clientId) sendCleanLeave();
+  });
 
   async function handleServerMessage(msg) {
     switch (msg.type) {
@@ -252,7 +314,7 @@
 
       case 'IMPORT_SUCCESS':
         $('dmBackupRestoreBanner').classList.add('hidden');
-        showToast('💾 Кампанію та хроніку відновлено з резервної копії!');
+        showToast('Кампанію та хроніку відновлено з резервної копії.');
         break;
 
       case 'SELF_WHISPER_UPDATED':
@@ -264,7 +326,7 @@
           };
           $('whisperTargetLabel').textContent = state.whisperTarget.name;
           $('whisperActiveBanner').classList.remove('hidden');
-          $('chatInput').placeholder = `🔮 Телепатичний шепіт для ${state.whisperTarget.name}...`;
+          $('chatInput').placeholder = `Телепатичний шепіт для ${state.whisperTarget.name}...`;
         } else {
           state.whisperTarget = null;
           $('whisperActiveBanner').classList.add('hidden');
@@ -324,9 +386,9 @@
 
       case 'FORCED_LANGUAGE_NOTICE':
         if (msg.active) {
-          showToast(`👑 Майстер увімкнув Режим Діалогу: ви зараз говорите мовою «${msg.languageName}».`);
+          showToast(`Майстер увімкнув Режим Діалогу: ви зараз говорите мовою «${msg.languageName}».`);
         } else {
-          showToast('🗣️ Режим Діалогу завершено — ви повернулися на Загальну мову.');
+          showToast('Режим Діалогу завершено — ви повернулися на Загальну мову.');
         }
         break;
 
@@ -379,7 +441,7 @@
         break;
 
       case 'ERROR':
-        showToast(`⚠️ ${msg.error}`);
+        showToast(msg.error);
         break;
     }
   }
@@ -437,7 +499,7 @@
     } catch (err) {
       state.micEnabled = false;
       updateMicButtonUi();
-      showToast('🎙️ Мікрофон недоступний (режим слухача). Натисніть «Мікрофон», щоб надати доступ або перевірте HTTPS.');
+      showToast('Мікрофон недоступний (режим слухача). Натисніть «Мікрофон», щоб надати доступ або перевірте HTTPS.');
     }
   }
 
@@ -464,14 +526,13 @@
     const btn = $('micToggleBtn');
     const icon = $('micBtnIcon');
     const label = $('micBtnLabel');
+    icon.textContent = '';
     if (!state.micEnabled) {
       btn.classList.add('muted');
-      icon.textContent = '🔇';
       label.textContent = 'Увімкнути мік';
       return;
     }
     btn.classList.toggle('muted', state.micMuted);
-    icon.textContent = state.micMuted ? '🔇' : '🎙️';
     label.textContent = state.micMuted ? 'Вимкнено' : 'Мікрофон';
   }
 
@@ -545,7 +606,10 @@
   });
 
   $('switchCharBtn').addEventListener('click', () => {
-    window.location.href = window.location.pathname;
+    sendCleanLeave();
+    setTimeout(() => {
+      window.location.href = window.location.pathname;
+    }, 80);
   });
 
   function setPeerConnState(peerId, connState) {
@@ -559,14 +623,14 @@
 
     const badge = document.querySelector(`.peer-card[data-client-id="${peerId}"] .peer-conn-label`);
     if (badge) {
-      badge.textContent = formatConnStateLabel(connState);
+      badge.innerHTML = formatConnStateLabel(connState);
     }
   }
 
   function formatConnStateLabel(connState) {
-    if (connState === 'connected') return '🟢 Прямий зв’язок';
-    if (connState === 'relay') return '🟣 Ретранслятор';
-    return '🟡 З’єднання...';
+    if (connState === 'connected') return '<span class="conn-dot connected"></span><span>Прямий зв’язок</span>';
+    if (connState === 'relay') return '<span class="conn-dot relay"></span><span>Ретранслятор</span>';
+    return '<span class="conn-dot connecting"></span><span>З’єднання...</span>';
   }
 
   async function setupPeerConnection(peerId, forceInitiator = false) {
@@ -693,7 +757,7 @@
   }
 
   async function reconnectPeer(peerId) {
-    showToast('🔄 Перепідключення аудіо-з’єднання...');
+    showToast('Перепідключення аудіо-з’єднання...');
     await setupPeerConnection(peerId, true);
     renderPeersGrid();
   }
@@ -701,7 +765,7 @@
   // -------------------- UI RENDERING --------------------
   function renderIdentityHeader() {
     if (state.role === 'dm') {
-      $('myAvatarIcon').textContent = '👑';
+      $('myAvatarIcon').textContent = '♔';
       $('myDisplayName').textContent = 'Майстер (ГМ)';
       $('myRoleTitle').textContent = 'Володіє всіма мовами світу';
       $('myBuffsBar').innerHTML = '';
@@ -715,8 +779,8 @@
     $('myRoleTitle').textContent = c.title;
 
     const buffs = [];
-    if (c.comprehendLanguages) buffs.push('<span class="buff-badge">🔮 Comprehend Languages</span>');
-    if (c.tongues) buffs.push('<span class="buff-badge">🗣️ Tongues</span>');
+    if (c.comprehendLanguages) buffs.push('<span class="buff-badge">Comprehend Languages</span>');
+    if (c.tongues) buffs.push('<span class="buff-badge">Tongues</span>');
     $('myBuffsBar').innerHTML = buffs.join('');
   }
 
@@ -739,16 +803,16 @@
     runic: 'ᚠᚢᚦᚨ ᚱᚲᚷᚹ',
     infernal: 'ΨΩ∆ ‡ѮѲ',
     draconic: 'ΔΛΣ ᚠᚲᛉ',
-    druidic: 'ᚠᚦ❦ ✿ᛟ',
+    druidic: 'ᚠᚦ❧ ᛉᛟ',
     alien: '⊗⊕◈ ⌖⌗',
     ancient: 'ΑΒΓѢ ѦѮѰ',
-    imperial: '⚙⌖⌬ §0F',
+    imperial: '⌬⌖⌸ §0F',
     steppe: 'ҚҒҢ ӨӘҖ',
     cipher: '†‡§ ◊※'
   };
 
   function updateActiveLanguageVisuals() {
-    const lang = getLanguage(state.activeLanguageId) || { id: 'common', name: 'Загальна', icon: '🗣️', color: '#c89d54', scriptStyle: 'common' };
+    const lang = getLanguage(state.activeLanguageId) || { id: 'common', name: 'Загальна', icon: '◈', color: '#c89d54', scriptStyle: 'common' };
     const shell = $('appShell');
     const isForeign = lang.id !== 'common';
     const accentColor = isForeign ? lang.color : '#c89d54';
@@ -869,7 +933,7 @@
     if (state.activeLanguageId === peer.languageId) return;
 
     state.replyPromptLang = peer;
-    $('replyPromptText').innerHTML = `🔔 <strong>${escapeHtml(peer.displayName)}</strong> говорить мовою <strong>${peer.languageIcon} ${escapeHtml(peer.languageName)}</strong>!`;
+    $('replyPromptText').innerHTML = `<strong>${escapeHtml(peer.displayName)}</strong> говорить мовою <strong>${peer.languageIcon} ${escapeHtml(peer.languageName)}</strong>`;
     $('replyPromptBanner').classList.remove('hidden');
 
     clearTimeout(state.replyPromptTimer);
@@ -893,14 +957,14 @@
     const grid = $('peersGrid');
     grid.innerHTML = '';
 
-    const selfLang = getLanguage(state.activeLanguageId) || { id: 'common', name: 'Загальна', icon: '🗣️', color: '#e2e8f0' };
+    const selfLang = getLanguage(state.activeLanguageId) || { id: 'common', name: 'Загальна', icon: '◈', color: '#e2e8f0' };
     const selfCard = document.createElement('div');
     selfCard.className = 'peer-card self-card';
     selfCard.dataset.characterId = state.character?.id || '';
     selfCard.innerHTML = `
       <div class="peer-top">
-        <div class="peer-avatar" style="background:${state.role === 'dm' ? '#eab30822' : (state.character?.avatarColor + '22')};border:1px solid ${state.role === 'dm' ? '#eab308' : state.character?.avatarColor}">
-          ${state.role === 'dm' ? '👑' : (state.character?.icon || '🛡️')}
+        <div class="peer-avatar" style="background:${state.role === 'dm' ? '#c89d5422' : (state.character?.avatarColor + '22')};border:1px solid ${state.role === 'dm' ? '#c89d54' : state.character?.avatarColor}">
+          ${state.role === 'dm' ? '♔' : (state.character?.icon || '❖')}
         </div>
         <div>
           <div class="peer-name">${escapeHtml(state.role === 'dm' ? 'Майстер (ГМ)' : state.character?.name)} (Ви)</div>
@@ -929,15 +993,15 @@
       let statusHtml;
       if (peer.mutedByWhisper) {
         statusHtml = `<div class="peer-lang-status unknown">
-             <span>🤫 Таємний шепіт (не вам)</span>
+             <span>Таємний шепіт (не вам)</span>
            </div>`;
       } else if (peer.understood) {
         statusHtml = `<div class="peer-lang-status" style="border-left:3px solid ${peer.languageColor}">
-             <span>${peer.languageIcon} ${escapeHtml(peer.languageName)}${peer.isWhisperToMe ? ' (🔮 Шепіт вам)' : ''}</span>
+             <span>${peer.languageIcon} ${escapeHtml(peer.languageName)}${peer.isWhisperToMe ? ' (Шепіт вам)' : ''}</span>
            </div>`;
       } else {
         statusHtml = `<div class="peer-lang-status unknown">
-             <span>❓ Невідома мова${peer.isWhisperToMe ? ' (🔮 Шепіт вам)' : ''}</span>
+             <span>? Невідома мова${peer.isWhisperToMe ? ' (Шепіт вам)' : ''}</span>
              <span class="mystic-runes-anim">ᚠᚦᚱ</span>
            </div>`;
       }
@@ -957,14 +1021,14 @@
           <span class="peer-conn-label">${formatConnStateLabel(connState)}</span>
           <div class="peer-actions-row">
             <button type="button" class="btn btn-sm btn-ghost peer-whisper-btn ${isWhisperingToThis ? 'btn-active' : ''}" title="Телепатичний шепіт лише цьому гравцю">
-              🔮 Шепіт
+              Шепіт
             </button>
-            <button type="button" class="btn btn-sm btn-ghost peer-reconnect-btn" title="Перепідключити звук">🔄</button>
+            <button type="button" class="btn btn-sm btn-ghost peer-reconnect-btn" title="Перепідключити звук">↻</button>
           </div>
         </div>
         <div class="peer-volume-row">
-          <button type="button" class="btn btn-sm btn-ghost peer-mute-btn" title="Вимкнути/Увімкнути звук учасника">
-            ${pref.muted ? '🔇' : '🔊'}
+          <button type="button" class="btn btn-sm btn-ghost peer-mute-btn" title="Вимкнути або увімкнути звук учасника">
+            ${pref.muted ? 'Тихо' : 'Звук'}
           </button>
           <input type="range" min="0" max="2" step="0.05" value="${pref.volume}" />
           <span class="peer-vol-pct">${volPct}%</span>
@@ -977,7 +1041,7 @@
         const nextMuted = !cur.muted;
         setPeerAudioPref(peer, { muted: nextMuted });
         audioEngine.setPeerMuted(peer.clientId, nextMuted);
-        muteBtn.textContent = nextMuted ? '🔇' : '🔊';
+        muteBtn.textContent = nextMuted ? 'Тихо' : 'Звук';
       });
 
       const slider = card.querySelector('input[type="range"]');
@@ -1047,15 +1111,15 @@
           </div>
           <div class="dm-char-actions">
             <button class="btn btn-sm ${isForced ? 'btn-active' : ''}" data-action="dialogue">
-              🔗 ${isForced ? `Діалог: ${escapeHtml(forcedLangObj?.name || '')}` : `Діалог (${escapeHtml(activeLang?.name || 'Загальна')})`}
+              ${isForced ? `Діалог: ${escapeHtml(forcedLangObj?.name || '')}` : `Діалог (${escapeHtml(activeLang?.name || 'Загальна')})`}
             </button>
             <button class="btn btn-sm ${char.comprehendLanguages ? 'btn-active' : ''}" data-action="comprehend">
-              🔮 Comprehend Languages
+              Comprehend Languages
             </button>
             <button class="btn btn-sm ${char.tongues ? 'btn-active' : ''}" data-action="tongues">
-              🗣️ Tongues
+              Tongues
             </button>
-            <button class="btn btn-sm btn-danger" data-action="delete" title="Видалити персонажа">🗑️</button>
+            <button class="btn btn-sm btn-danger" data-action="delete" title="Видалити персонажа">Видалити</button>
           </div>
         </div>
         <div class="dm-lang-chips"></div>
@@ -1131,9 +1195,9 @@
       const serverCount = (serverSnap.messages?.length || 0) + (serverSnap.languages?.length || 0) + (serverSnap.characters?.length || 0);
 
       if (cachedCount > serverCount && Array.isArray(cached.languages) && Array.isArray(cached.characters)) {
-        state.pendingBackupSnapshot = cached;
+        state.pendingBackupSnapshot = sanitizeSnapshotIcons(cached);
         $('dmBackupRestoreText').textContent =
-          `💾 У браузері є резервна копія кампанії (повідомлень: ${cached.messages?.length || 0}, мов: ${cached.languages?.length || 0}, героїв: ${cached.characters?.length || 0}). Відновити її на сервері?`;
+          `У браузері є резервна копія кампанії (повідомлень: ${cached.messages?.length || 0}, мов: ${cached.languages?.length || 0}, героїв: ${cached.characters?.length || 0}). Відновити її на сервері?`;
         $('dmBackupRestoreBanner').classList.remove('hidden');
       } else {
         saveDmBackup(serverSnap);
@@ -1182,10 +1246,10 @@
     const reader = new FileReader();
     reader.onload = () => {
       try {
-        const snapshot = JSON.parse(reader.result);
+        const snapshot = sanitizeSnapshotIcons(JSON.parse(reader.result));
         wsSend({ type: 'DM_IMPORT_STATE', snapshot });
       } catch {
-        showToast('⚠️ Не вдалося прочитати JSON-файл резервної копії.');
+        showToast('Не вдалося прочитати JSON-файл резервної копії.');
       }
       e.target.value = '';
     };
@@ -1205,8 +1269,8 @@
       character: {
         name,
         title: $('newCharTitle').value.trim() || 'Авантюрист',
-        icon: $('newCharIcon').value.trim() || '🛡️',
-        avatarColor: $('newCharColor').value || '#38bdf8',
+        icon: sanitizeGlyph($('newCharIcon').value.trim(), null, '❖'),
+        avatarColor: $('newCharColor').value || '#c89d54',
         languages: ['common']
       }
     });
@@ -1257,11 +1321,11 @@
   function openLangBuilder(lang = null) {
     $('langBuilderModal').classList.remove('hidden');
     if (lang) {
-      $('langBuilderHeading').textContent = `⚙️ Редагування мови: ${lang.name}`;
+      $('langBuilderHeading').textContent = `Редагування мови: ${lang.name}`;
       $('lbId').value = lang.id;
       $('lbName').value = lang.name;
       $('lbCategory').value = lang.category || 'feria';
-      $('lbIcon').value = lang.icon || '✨';
+      $('lbIcon').value = lang.icon || '✦';
       $('lbColor').value = lang.color || '#c084fc';
       $('lbScriptStyle').value = lang.scriptStyle || 'ancient';
 
@@ -1278,11 +1342,11 @@
       $('lbFilterFreq').value = p.filterFreq ?? 1200;
       $('lbDeleteBtn').classList.remove('hidden');
     } else {
-      $('langBuilderHeading').textContent = '✨ Конструктор мови / шифру Ферії';
+      $('langBuilderHeading').textContent = 'Конструктор мови чи шифру Ферії';
       $('lbId').value = '';
       $('lbName').value = '';
       $('lbCategory').value = 'feria';
-      $('lbIcon').value = '🕯️';
+      $('lbIcon').value = '✦';
       $('lbColor').value = '#c084fc';
       $('lbScriptStyle').value = 'ancient';
       $('lbGrain').value = 150;
@@ -1348,7 +1412,7 @@
       id: id || undefined,
       name: $('lbName').value.trim(),
       category: $('lbCategory').value,
-      icon: $('lbIcon').value.trim() || '✨',
+      icon: sanitizeGlyph($('lbIcon').value.trim(), id, '✦'),
       color: $('lbColor').value,
       scriptStyle: $('lbScriptStyle').value,
       dspPreset: readBuilderDspPreset()
@@ -1423,13 +1487,13 @@
 
       const badges = [];
       if (msg.isWhisper) {
-        badges.push(`<span class="whisper-badge">🔮 Телепатія${msg.whisperTargetName ? ` → ${escapeHtml(msg.whisperTargetName)}` : ''}</span>`);
+        badges.push(`<span class="whisper-badge">Телепатія${msg.whisperTargetName ? ` → ${escapeHtml(msg.whisperTargetName)}` : ''}</span>`);
       }
       if (msg.partiallyDeciphered) {
-        badges.push(`<span class="decipher-badge">🔍 Розшифровано на ${msg.revealPercent}%</span>`);
+        badges.push(`<span class="decipher-badge">Розшифровано на ${msg.revealPercent}%</span>`);
       }
       if (msg.translatedForParty) {
-        badges.push(`<span class="translated-badge">🗣️ Переклав: ${escapeHtml(msg.translatedBy || 'Гравець')}</span>`);
+        badges.push(`<span class="translated-badge">Переклав: ${escapeHtml(msg.translatedBy || 'Гравець')}</span>`);
       }
       if (state.role === 'dm' && msg.revealMap) {
         Object.entries(msg.revealMap).forEach(([charId, pct]) => {
@@ -1437,7 +1501,7 @@
             const label = charId === 'ALL'
               ? 'Усі'
               : (state.characters.find((c) => c.id === charId)?.name || charId);
-            badges.push(`<span class="decipher-badge">👁️ ${escapeHtml(label)}: ${pct}%</span>`);
+            badges.push(`<span class="decipher-badge">${escapeHtml(label)}: ${pct}%</span>`);
           }
         });
       }
@@ -1453,7 +1517,7 @@
             ${escapeHtml(langDisplay)}
           </span>
         </div>
-        ${msg.isHandout ? `<strong>📜 ${escapeHtml(msg.title || 'Древній Свиток / Напис')}</strong>` : ''}
+        ${msg.isHandout ? `<strong>${escapeHtml(msg.title || 'Древній Свиток / Напис')}</strong>` : ''}
         <div class="chat-msg-body ${msg.understood ? '' : 'runic-text'}">${escapeHtml(msg.text)}</div>
         ${badges.length ? `<div class="chat-msg-badges">${badges.join('')}</div>` : ''}
         <div class="chat-msg-controls"></div>
@@ -1467,7 +1531,7 @@
         const openBtn = document.createElement('button');
         openBtn.type = 'button';
         openBtn.className = 'btn btn-sm btn-brass';
-        openBtn.textContent = '📜 Відкрити Свиток';
+        openBtn.textContent = 'Відкрити Свиток';
         openBtn.addEventListener('click', () => openHandoutModal(msg));
         controls.appendChild(openBtn);
       }
@@ -1479,7 +1543,7 @@
         const transBtn = document.createElement('button');
         transBtn.type = 'button';
         transBtn.className = 'btn btn-sm btn-arcane';
-        transBtn.textContent = '🗣️ Перекласти групі';
+        transBtn.textContent = 'Перекласти групі';
         transBtn.addEventListener('click', () => {
           wsSend({ type: 'TRANSLATE_FOR_PARTY', messageId: msg.id });
         });
@@ -1530,7 +1594,7 @@
         const delBtn = document.createElement('button');
         delBtn.type = 'button';
         delBtn.className = 'btn btn-sm btn-danger chat-msg-delete-btn';
-        delBtn.textContent = '🗑️ Видалити';
+        delBtn.textContent = 'Видалити';
         delBtn.title = 'Видалити повідомлення з хроніки для всіх';
         delBtn.addEventListener('click', () => {
           wsSend({ type: 'DELETE_MESSAGE', messageId: msg.id });
@@ -1564,8 +1628,8 @@
     body.classList.toggle('runic-text', !msg.understood);
 
     const metaParts = [];
-    if (msg.partiallyDeciphered) metaParts.push(`🔍 Розшифровано слів: ${msg.revealPercent}%`);
-    if (msg.translatedForParty) metaParts.push(`🗣️ Переклав: ${msg.translatedBy}`);
+    if (msg.partiallyDeciphered) metaParts.push(`Розшифровано слів: ${msg.revealPercent}%`);
+    if (msg.translatedForParty) metaParts.push(`Переклав: ${msg.translatedBy}`);
     $('handoutModalMeta').textContent = metaParts.join(' • ');
 
     const actions = $('handoutModalActions');
@@ -1573,7 +1637,7 @@
     if (msg.understood && !msg.translatedForParty && msg.languageId !== 'common') {
       const btn = document.createElement('button');
       btn.className = 'btn btn-arcane';
-      btn.textContent = '🗣️ Поділитися перекладом з групою';
+      btn.textContent = 'Поділитися перекладом з групою';
       btn.addEventListener('click', () => {
         wsSend({ type: 'TRANSLATE_FOR_PARTY', messageId: msg.id });
       });
@@ -1582,7 +1646,7 @@
     if (state.role === 'dm') {
       const delBtn = document.createElement('button');
       delBtn.className = 'btn btn-danger';
-      delBtn.textContent = '🗑️ Видалити напис';
+      delBtn.textContent = 'Видалити напис';
       delBtn.addEventListener('click', () => {
         wsSend({ type: 'DELETE_MESSAGE', messageId: msg.id });
       });

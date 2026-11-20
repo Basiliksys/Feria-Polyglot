@@ -18,12 +18,62 @@ const SCRIPT_ALPHABETS = {
   druidic: 'ᚠᚦᚱᚲᚹᛁᛃᛈᛊᛏᛖᛚᛞᛟ❦❧✿❀❁✾✽❃',
   alien: '⊗⊕⊘⊙⊚⊛⊜⊝⊞⊟⊠⊡◈◉◊○◍◎●◐◑⌖⌗',
   ancient: 'ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩѢѲѴѦ',
-  imperial: '⚙⌖⌗⌬⌭⌸⌹⊞⊟⊠⊡§¶∆0123456789ABCDEF',
+  imperial: '⌸⌖⌗⌬⌭⌸⌹⊞⊟⊠⊡§¶∆0123456789ABCDEF',
   steppe: 'ҚҒҢҮҰҺӨӘҖӜӞӤӦӨӪӬӮӰӲӴᚠᚱᛏᚺ',
   cipher: '†‡§¤¿¡‽※◊○●□■△▲▽▼★☆♠♣♥♦'
 };
 
+const DEFAULT_GLYPHS = {
+  common: '◈',
+  elvish: '❧',
+  dwarvish: 'ᛏ',
+  draconic: 'Δ',
+  infernal: 'Ψ',
+  abyssal: '⸸',
+  druidic: 'ᛉ',
+  primordial: '≈',
+  deep_speech: '◉',
+  celestial: '✦',
+  thieves_cant: '‡',
+  undercommon: '⊘',
+  kiros_ancient: 'Ѫ',
+  niman_cipher: '⌬',
+  steppe_turs: 'ᚱ',
+  amenemhet: '☽',
+  adrian: '†',
+  liora: 'ᛉ',
+  jagatai: 'ᚱ'
+};
+
+function sanitizeGlyph(icon, id, fallback = '✦') {
+  const str = String(icon || '').trim();
+  if (!str || /\p{Extended_Pictographic}/u.test(str) || str === '⚔️' || str === '⚒️' || str === '👁️' || str === '🗝️' || str === '🕳️' || str === '🕯️' || str === '⚙️' || str === '🗣️' || str === '🛡️') {
+    return DEFAULT_GLYPHS[id] || fallback;
+  }
+  return str;
+}
+
+function sanitizeStateIcons(targetState) {
+  if (!targetState) return;
+  if (Array.isArray(targetState.languages)) {
+    targetState.languages.forEach((l) => {
+      if (l) l.icon = sanitizeGlyph(l.icon, l.id, '✦');
+    });
+  }
+  if (Array.isArray(targetState.characters)) {
+    targetState.characters.forEach((c) => {
+      if (c) c.icon = sanitizeGlyph(c.icon, c.id, '❖');
+    });
+  }
+  if (Array.isArray(targetState.messages)) {
+    targetState.messages.forEach((m) => {
+      if (m) m.senderIcon = sanitizeGlyph(m.senderIcon, m.senderCharacterId, m.senderCharacterId ? '❖' : '♔');
+    });
+  }
+}
+
 let state = loadState();
+sanitizeStateIcons(state);
 const clients = new Map(); // clientId -> client record
 const messages = Array.isArray(state.messages) ? state.messages : []; // Persisted session messages & handouts
 state.messages = messages;
@@ -31,7 +81,9 @@ state.messages = messages;
 function loadState() {
   try {
     const raw = fs.readFileSync(DATA_PATH, 'utf8');
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    sanitizeStateIcons(parsed);
+    return parsed;
   } catch (err) {
     console.error('Failed to read campaign-state.json:', err);
     return { dmPin: '1250', languages: [], characters: [], messages: [] };
@@ -234,8 +286,8 @@ function projectLanguageForListener(speakerClient, listenerClient) {
   if (whisperOn && !whisperAllowed) {
     return {
       languageId: 'whisper',
-      languageName: '🤫 Таємний шепіт',
-      languageIcon: '🤫',
+      languageName: 'Таємний шепіт',
+      languageIcon: '~',
       languageColor: '#64748b',
       scriptStyle: lang.scriptStyle,
       understood: false,
@@ -268,7 +320,7 @@ function projectLanguageForListener(speakerClient, listenerClient) {
   return {
     languageId: 'unknown',
     languageName: 'Невідома мова',
-    languageIcon: '❓',
+    languageIcon: '?',
     languageColor: '#64748b',
     scriptStyle: lang.scriptStyle,
     understood: false,
@@ -288,8 +340,8 @@ function buildPeerSummaryForListener(peerClient, listenerClient) {
     characterId: peerClient.characterId || null,
     displayName: peerClient.role === 'dm' ? 'Майстер (ГМ)' : (char ? char.name : 'Гравець'),
     title: peerClient.role === 'dm' ? 'Game Master' : (char ? char.title : ''),
-    icon: peerClient.role === 'dm' ? '👑' : (char ? char.icon : '🛡️'),
-    avatarColor: peerClient.role === 'dm' ? '#eab308' : (char ? char.avatarColor : '#6366f1'),
+    icon: peerClient.role === 'dm' ? '♔' : (char ? char.icon : '❖'),
+    avatarColor: peerClient.role === 'dm' ? '#c89d54' : (char ? char.avatarColor : '#6366f1'),
     isSpeaking: !!peerClient.isSpeaking,
     speakingLevel: peerClient.speakingLevel || 0,
     ...projected
@@ -332,7 +384,7 @@ function projectMessageForListener(msg, listenerClient) {
     timestamp: msg.timestamp,
     languageId: showLanguageName ? lang.id : 'unknown',
     languageName: showLanguageName ? lang.name : 'Невідома мова',
-    languageIcon: showLanguageName ? lang.icon : '❓',
+    languageIcon: showLanguageName ? lang.icon : '?',
     languageColor: showLanguageName ? lang.color : '#64748b',
     scriptStyle: lang.scriptStyle,
     understood: isFullyRevealed,
@@ -447,11 +499,35 @@ app.get('/api/lobby', (_req, res) => {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
+function disconnectClient(targetClient, closeWs = true) {
+  if (!targetClient) return;
+  const wasJoined = targetClient.joined;
+  targetClient.joined = false;
+  clients.delete(targetClient.id);
+
+  if (wasJoined) {
+    for (const other of clients.values()) {
+      if (other.joined) {
+        sendJson(other.ws, { type: 'PEER_LEFT', clientId: targetClient.id });
+      }
+    }
+  }
+
+  if (closeWs && targetClient.ws) {
+    try {
+      if (targetClient.ws.readyState === WebSocket.OPEN || targetClient.ws.readyState === WebSocket.CONNECTING) {
+        targetClient.ws.close(4000, 'Session closed or replaced');
+      }
+    } catch {}
+  }
+}
+
 wss.on('connection', (ws) => {
   const clientId = crypto.randomUUID();
   const client = {
     id: clientId,
     ws,
+    isAlive: true,
     joined: false,
     role: 'player',
     characterId: null,
@@ -462,6 +538,10 @@ wss.on('connection', (ws) => {
     speakingLevel: 0
   };
   clients.set(clientId, client);
+
+  ws.on('pong', () => {
+    client.isAlive = true;
+  });
 
   ws.on('message', (rawData) => {
     let data;
@@ -475,26 +555,47 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
-    const wasJoined = client.joined;
-    clients.delete(clientId);
-    if (wasJoined) {
-      for (const other of clients.values()) {
-        if (other.joined) {
-          sendJson(other.ws, { type: 'PEER_LEFT', clientId });
-        }
-      }
-    }
+    disconnectClient(client, false);
   });
 });
 
+// 20-second heartbeat ping to purge stale/ghost WebSocket connections behind proxies
+const heartbeatTimer = setInterval(() => {
+  for (const client of [...clients.values()]) {
+    if (client.isAlive === false) {
+      try { client.ws.terminate(); } catch {}
+      disconnectClient(client, false);
+      continue;
+    }
+    client.isAlive = false;
+    try {
+      if (client.ws.readyState === WebSocket.OPEN) {
+        client.ws.ping();
+      }
+    } catch {}
+  }
+}, 20000);
+heartbeatTimer.unref();
+
 function handleMessage(client, data) {
   switch (data.type) {
+    case 'LEAVE': {
+      disconnectClient(client, true);
+      break;
+    }
+
     case 'JOIN': {
       const role = data.role === 'dm' ? 'dm' : 'player';
       if (role === 'dm') {
         if (String(data.pin || '') !== String(state.dmPin)) {
           sendJson(client.ws, { type: 'JOIN_ERROR', error: 'Невірний PIN-код Майстра.' });
           return;
+        }
+        // Evict any existing ghost/duplicate DM sessions cleanly
+        for (const other of [...clients.values()]) {
+          if (other.id !== client.id && other.joined && other.role === 'dm') {
+            disconnectClient(other, true);
+          }
         }
         client.role = 'dm';
         client.characterId = null;
@@ -503,6 +604,12 @@ function handleMessage(client, data) {
         if (!char) {
           sendJson(client.ws, { type: 'JOIN_ERROR', error: 'Персонажа не знайдено.' });
           return;
+        }
+        // Evict any existing ghost/duplicate sessions for the same character
+        for (const other of [...clients.values()]) {
+          if (other.id !== client.id && other.joined && other.characterId === char.id) {
+            disconnectClient(other, true);
+          }
         }
         client.role = 'player';
         client.characterId = char.id;
@@ -645,8 +752,8 @@ function handleMessage(client, data) {
         senderClientId: client.id,
         senderCharacterId: char ? char.id : null,
         senderName: client.role === 'dm' ? 'Майстер (ГМ)' : (char ? char.name : 'Гравець'),
-        senderIcon: client.role === 'dm' ? '👑' : (char ? char.icon : '🛡️'),
-        senderColor: client.role === 'dm' ? '#eab308' : (char ? char.avatarColor : '#6366f1'),
+        senderIcon: client.role === 'dm' ? '♔' : (char ? char.icon : '❖'),
+        senderColor: client.role === 'dm' ? '#c89d54' : (char ? char.avatarColor : '#6366f1'),
         languageId: langId,
         text: rawText,
         isHandout: !!data.isHandout && client.role === 'dm',
@@ -894,7 +1001,7 @@ function handleMessage(client, data) {
         existing.name = name;
         existing.category = ['standard', 'exotic', 'feria'].includes(payload.category) ? payload.category : existing.category;
         existing.color = payload.color || existing.color;
-        existing.icon = payload.icon || existing.icon;
+        existing.icon = sanitizeGlyph(payload.icon, existing.id, existing.icon || '✦');
         existing.scriptStyle = SCRIPT_ALPHABETS[payload.scriptStyle] ? payload.scriptStyle : existing.scriptStyle;
         existing.dspPreset = sanitizedPreset;
       } else {
@@ -908,7 +1015,7 @@ function handleMessage(client, data) {
           name,
           category: ['standard', 'exotic', 'feria'].includes(payload.category) ? payload.category : 'feria',
           color: payload.color || '#c084fc',
-          icon: payload.icon || '✨',
+          icon: sanitizeGlyph(payload.icon, newId, '✦'),
           scriptStyle: SCRIPT_ALPHABETS[payload.scriptStyle] ? payload.scriptStyle : 'ancient',
           dspPreset: sanitizedPreset
         });
@@ -952,7 +1059,7 @@ function handleMessage(client, data) {
         id,
         name,
         title: String(payload.title || 'Авантюрист').trim(),
-        icon: payload.icon || '🛡️',
+        icon: sanitizeGlyph(payload.icon, id, '❖'),
         avatarColor: payload.avatarColor || '#38bdf8',
         languages: knownLangs,
         comprehendLanguages: false,
@@ -993,6 +1100,7 @@ function handleMessage(client, data) {
         snap.messages.slice(-150).forEach((m) => messages.push(m));
       }
       state.messages = messages;
+      sanitizeStateIcons(state);
       saveState();
       broadcastStateSync();
       for (const peer of clients.values()) {

@@ -6,7 +6,7 @@
       "name": "Загальна",
       "category": "standard",
       "color": "#e2e8f0",
-      "icon": "🗣️",
+      "icon": "◈",
       "scriptStyle": "common",
       "dspPreset": {
         "grainSizeMs": 140,
@@ -27,7 +27,7 @@
       "name": "Ельфійська",
       "category": "standard",
       "color": "#34d399",
-      "icon": "🌿",
+      "icon": "❧",
       "scriptStyle": "elvish",
       "dspPreset": {
         "grainSizeMs": 155,
@@ -48,7 +48,7 @@
       "name": "Дворфійська",
       "category": "standard",
       "color": "#f59e0b",
-      "icon": "⚒️",
+      "icon": "ᛏ",
       "scriptStyle": "runic",
       "dspPreset": {
         "grainSizeMs": 125,
@@ -69,7 +69,7 @@
       "name": "Драконяча",
       "category": "exotic",
       "color": "#ef4444",
-      "icon": "🐉",
+      "icon": "Δ",
       "scriptStyle": "draconic",
       "dspPreset": {
         "grainSizeMs": 165,
@@ -90,7 +90,7 @@
       "name": "Інфернальна",
       "category": "exotic",
       "color": "#dc2626",
-      "icon": "🔥",
+      "icon": "Ψ",
       "scriptStyle": "infernal",
       "dspPreset": {
         "grainSizeMs": 150,
@@ -111,7 +111,7 @@
       "name": "Абіссальна",
       "category": "exotic",
       "color": "#991b1b",
-      "icon": "💀",
+      "icon": "⸸",
       "scriptStyle": "infernal",
       "dspPreset": {
         "grainSizeMs": 115,
@@ -132,7 +132,7 @@
       "name": "Друїдична",
       "category": "exotic",
       "color": "#10b981",
-      "icon": "🍃",
+      "icon": "ᛉ",
       "scriptStyle": "druidic",
       "dspPreset": {
         "grainSizeMs": 170,
@@ -153,7 +153,7 @@
       "name": "Первинна",
       "category": "exotic",
       "color": "#06b6d4",
-      "icon": "🌊",
+      "icon": "≈",
       "scriptStyle": "runic",
       "dspPreset": {
         "grainSizeMs": 185,
@@ -174,7 +174,7 @@
       "name": "Глибинна мова",
       "category": "exotic",
       "color": "#a855f7",
-      "icon": "👁️",
+      "icon": "◉",
       "scriptStyle": "alien",
       "dspPreset": {
         "grainSizeMs": 195,
@@ -195,7 +195,7 @@
       "name": "Небесна",
       "category": "exotic",
       "color": "#fde047",
-      "icon": "✨",
+      "icon": "✦",
       "scriptStyle": "elvish",
       "dspPreset": {
         "grainSizeMs": 175,
@@ -216,7 +216,7 @@
       "name": "Злодійський жаргон",
       "category": "exotic",
       "color": "#64748b",
-      "icon": "🗝️",
+      "icon": "‡",
       "scriptStyle": "cipher",
       "dspPreset": {
         "grainSizeMs": 110,
@@ -237,7 +237,7 @@
       "name": "Підземна загальна",
       "category": "exotic",
       "color": "#6366f1",
-      "icon": "🕳️",
+      "icon": "⊘",
       "scriptStyle": "alien",
       "dspPreset": {
         "grainSizeMs": 135,
@@ -258,7 +258,7 @@
       "name": "Давня мова Кіросу",
       "category": "feria",
       "color": "#c084fc",
-      "icon": "🕯️",
+      "icon": "Ѫ",
       "scriptStyle": "ancient",
       "dspPreset": {
         "grainSizeMs": 205,
@@ -279,7 +279,7 @@
       "name": "Імперський Шифр Німану",
       "category": "feria",
       "color": "#94a3b8",
-      "icon": "⚙️",
+      "icon": "⌬",
       "scriptStyle": "imperial",
       "dspPreset": {
         "grainSizeMs": 120,
@@ -300,7 +300,7 @@
       "name": "Степова говірка Турсу",
       "category": "feria",
       "color": "#d97706",
-      "icon": "🐎",
+      "icon": "ᚱ",
       "scriptStyle": "steppe",
       "dspPreset": {
         "grainSizeMs": 130,
@@ -322,7 +322,7 @@
       "id": "amenemhet",
       "name": "Аменемхет-Кемі",
       "title": "Маг Вищого Чародійства",
-      "icon": "🔮",
+      "icon": "☽",
       "avatarColor": "#a855f7",
       "languages": ["common", "draconic", "elvish", "infernal"],
       "comprehendLanguages": false,
@@ -333,7 +333,7 @@
       "id": "adrian",
       "name": "Адріан Морвейн",
       "title": "Шукач Саркофага",
-      "icon": "⚔️",
+      "icon": "†",
       "avatarColor": "#ef4444",
       "languages": ["common", "abyssal", "infernal", "undercommon"],
       "comprehendLanguages": false,
@@ -344,7 +344,7 @@
       "id": "liora",
       "name": "Ліора",
       "title": "Друїд / Стихійний вогонь",
-      "icon": "🔥",
+      "icon": "ᛉ",
       "avatarColor": "#10b981",
       "languages": ["common", "druidic", "primordial", "elvish"],
       "comprehendLanguages": false,
@@ -355,7 +355,7 @@
       "id": "jagatai",
       "name": "Джагатай Кара-Буран",
       "title": "Воїн Ехо / Сотник «Чорна Буря»",
-      "icon": "🐎",
+      "icon": "ᚱ",
       "avatarColor": "#d97706",
       "languages": ["common", "steppe_turs"],
       "comprehendLanguages": false,

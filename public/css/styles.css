@@ -700,11 +700,12 @@ input:focus, select:focus, textarea:focus {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 1.7rem;
+  font-family: var(--font-display), 'Segoe UI Symbol', serif;
+  font-size: 1.75rem;
+  color: var(--bright-brass);
   background: radial-gradient(circle at 30% 30%, #2b2434, #100e14);
   border: 2px solid var(--active-lang-color);
   box-shadow: inset 0 0 12px rgba(0, 0, 0, 0.85), 0 0 18px color-mix(in srgb, var(--active-lang-color) 32%, transparent);
-  filter: sepia(0.55) saturate(0.8) contrast(1.18) brightness(0.92);
   flex-shrink: 0;
 }
 
@@ -791,7 +792,8 @@ input:focus, select:focus, textarea:focus {
 .char-avatar-badge,
 .brand-crest,
 .dm-crown {
-  filter: sepia(0.55) saturate(0.8) contrast(1.18) brightness(0.92);
+  font-family: var(--font-display), 'Segoe UI Symbol', serif;
+  color: var(--bright-brass);
 }
 
 .lang-btn:hover {
@@ -929,8 +931,52 @@ input:focus, select:focus, textarea:focus {
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  font-size: 0.76rem;
+  font-size: 0.78rem;
   color: var(--weathered-ash);
+}
+
+.peer-conn-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.conn-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+  background: var(--weathered-ash);
+}
+
+.conn-dot.connected {
+  background: var(--emerald-sage);
+  box-shadow: 0 0 6px rgba(46, 158, 115, 0.7);
+}
+
+.conn-dot.connecting {
+  background: var(--bright-brass);
+  box-shadow: 0 0 6px rgba(229, 190, 117, 0.65);
+}
+
+.conn-dot.relay {
+  background: #a78bfa;
+  box-shadow: 0 0 6px rgba(167, 139, 250, 0.7);
+}
+
+.mic-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  background: var(--emerald-sage);
+  box-shadow: 0 0 6px rgba(46, 158, 115, 0.75);
+}
+
+.btn-mic.muted .mic-dot {
+  background: var(--crimson-wax);
+  box-shadow: 0 0 6px rgba(185, 56, 56, 0.75);
 }
 
 .peer-actions-row {

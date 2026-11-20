@@ -14,7 +14,7 @@
   <div id="lobbyOverlay" class="overlay">
     <div class="lobby-modal codex-surface">
       <div class="lobby-header">
-        <div class="brand-crest" aria-hidden="true">⚔️</div>
+        <div class="brand-crest" aria-hidden="true">❖</div>
         <div>
           <h1>Feria Polyglot</h1>
           <p class="subtitle">Магічний кодекс мов, шепоту та рунічних свитків світу Ферії</p>
@@ -37,7 +37,7 @@
 
       <section class="lobby-section dm-login-box">
         <div class="dm-login-info">
-          <span class="dm-crown" aria-hidden="true">👑</span>
+          <span class="dm-crown" aria-hidden="true">♔</span>
           <div>
             <h3>Місце Майстра (ГМ)</h3>
             <p class="hint">Керування мовами світу, заклинаннями, свитками та хронікою. Локальний код: <code>1250</code></p>
@@ -90,7 +90,7 @@
         </div>
         <div class="form-row three-col">
           <label>Символ
-            <input type="text" id="lbIcon" value="🕯️" maxlength="4" />
+            <input type="text" id="lbIcon" value="✦" maxlength="4" />
           </label>
           <label>Барва
             <input type="color" id="lbColor" value="#c89d54" />
@@ -104,7 +104,7 @@
               <option value="draconic">Драконячі знаки (ΔΛΣᚠᚲ)</option>
               <option value="druidic">Друїдичні знаки (ᚠᚦ❦✿)</option>
               <option value="alien">Глибинні гліфи (⊗⊕◈⌖)</option>
-              <option value="imperial">Імперський шифр (⚙⌖⌬01A)</option>
+              <option value="imperial">Імперський шифр (⌸⌖⌬01A)</option>
               <option value="steppe">Степова писемність (ҚҒҢӨ)</option>
               <option value="cipher">Злодійський шифр (†§※◊)</option>
             </select>
@@ -115,7 +115,7 @@
           <div class="dsp-sliders-top">
             <h3>Акустичний DSP-профіль тарабарщини</h3>
             <button type="button" id="lbTestVoiceBtn" class="btn btn-sm btn-arcane">
-              🎧 Послухати через мій мікрофон
+              Послухати через мій мікрофон
             </button>
           </div>
 
@@ -176,7 +176,7 @@
     <header class="topbar codex-bar">
       <div class="topbar-left">
         <div class="identity-pill">
-          <span id="myAvatarIcon" class="identity-icon">🛡️</span>
+          <span id="myAvatarIcon" class="identity-icon">❖</span>
           <div>
             <div id="myDisplayName" class="identity-name">Герой</div>
             <div id="myRoleTitle" class="identity-sub">Роль</div>
@@ -188,7 +188,7 @@
       <div class="topbar-controls">
         <div class="mic-group">
           <button id="micToggleBtn" class="btn btn-mic" title="Увімкнути або вимкнути мікрофон">
-            <span id="micBtnIcon">🎙️</span>
+            <span id="micBtnIcon" class="mic-dot"></span>
             <span id="micBtnLabel">Мікрофон</span>
           </button>
           <div class="mic-meter" title="Рівень сигналу мікрофона і поріг шумодаву">
@@ -201,23 +201,23 @@
         </div>
 
         <label class="toggle-pill noise-gate-pill" title="Відсікає фоновий шум кімнати та клавіатури, коли ви мовчите">
-          <span>🔇 Шумодав <strong id="noiseGateLabel">25%</strong></span>
+          <span>Шумодав <strong id="noiseGateLabel">25%</strong></span>
           <input type="range" id="noiseGateSlider" min="0" max="100" step="5" value="25" />
         </label>
 
         <label class="toggle-pill" title="Ті, хто знає мову, чують розбірливий голос із легким тематичним забарвленням">
           <input type="checkbox" id="atmosphericToggle" checked />
-          <span>✨ Атмосферний тембр</span>
+          <span>Атмосферний тембр</span>
         </label>
 
         <label id="dmHearGibberishWrap" class="toggle-pill hidden" title="Дозволяє Майстру тимчасово чути не-Загальні мови гравців у вигляді тарабарщини">
           <input type="checkbox" id="dmHearGibberishToggle" />
-          <span>👂 Чути тарабарщину як гравці</span>
+          <span>Чути тарабарщину як гравці</span>
         </label>
 
         <div class="self-monitor-group">
           <button id="selfMonitorBtn" class="btn btn-ghost btn-sm" title="Почути свій власний голос у навушниках">
-            🎧 Тест голосу
+            Тест голосу
           </button>
           <select id="selfMonitorMode" class="select-compact hidden" title="Режим самопрослуховування">
             <option value="gibberish">Чути як Тарабарщину</option>
@@ -232,7 +232,7 @@
     <!-- Active Non-Common Language Warning Bar -->
     <div id="activeLangBanner" class="active-lang-banner hidden">
       <div class="active-lang-banner-text">
-        <span id="activeLangBannerIcon">🌿</span>
+        <span id="activeLangBannerIcon">❧</span>
         <span>Зараз звучить мова: <strong id="activeLangBannerName">Ельфійська</strong></span>
       </div>
       <button id="resetToCommonBtn" class="btn btn-sm btn-light">Повернутися на Загальну</button>
@@ -255,14 +255,14 @@
           <!-- Whisper / Telepathy Active Banner -->
           <div id="whisperActiveBanner" class="whisper-banner hidden">
             <div>
-              <span>🔮 Телепатичний шепіт для: <strong id="whisperTargetLabel"></strong> — інші не чують вас</span>
+              <span>Телепатичний шепіт для: <strong id="whisperTargetLabel"></strong> — інші не чують вас</span>
             </div>
             <button id="stopWhisperBtn" type="button" class="btn btn-sm btn-light">Завершити шепіт</button>
           </div>
 
           <!-- Focal Centerpiece: Active Tongue Altar -->
           <div id="activeTongueAltar" class="tongue-altar">
-            <div class="altar-seal" id="altarSealIcon">🗣️</div>
+            <div class="altar-seal" id="altarSealIcon">◈</div>
             <div class="altar-info">
               <div class="altar-title-row">
                 <h2 id="altarLangName">Загальна</h2>
@@ -296,7 +296,7 @@
         <!-- DM Dashboard (Only visible for DM) -->
         <section id="dmDashboard" class="panel dm-panel hidden">
           <div id="dmBackupRestoreBanner" class="dm-backup-banner hidden">
-            <div id="dmBackupRestoreText">💾 Знайдено локальну резервну копію кампанії в браузері (можливо, сервер Render прокинувся після сну).</div>
+            <div id="dmBackupRestoreText">Знайдено локальну резервну копію кампанії в браузері (можливо, сервер Render прокинувся після сну).</div>
             <div class="dm-backup-actions">
               <button id="restoreBackupBtn" type="button" class="btn btn-sm btn-brass">Відновити з бекапу</button>
               <button id="dismissBackupBtn" type="button" class="btn btn-sm btn-ghost">✕</button>
@@ -306,8 +306,8 @@
           <div class="panel-header">
             <h2>Панель Майстра</h2>
             <div class="dm-header-actions">
-              <button id="exportStateBtn" type="button" class="btn btn-ghost btn-sm" title="Зберегти мови, героїв та хроніку у JSON-файл">📥 Експорт JSON</button>
-              <button id="importStateBtn" type="button" class="btn btn-ghost btn-sm" title="Відновити стан кампанії з JSON-файлу">📤 Імпорт JSON</button>
+              <button id="exportStateBtn" type="button" class="btn btn-ghost btn-sm" title="Зберегти мови, героїв та хроніку у JSON-файл">Експорт JSON</button>
+              <button id="importStateBtn" type="button" class="btn btn-ghost btn-sm" title="Відновити стан кампанії з JSON-файлу">Імпорт JSON</button>
               <input type="file" id="importStateFile" accept=".json,application/json" class="hidden" />
               <button id="resetAllDialoguesBtn" class="btn btn-ghost btn-sm">Скинути всі діалоги</button>
               <button id="openLangBuilderBtn" class="btn btn-brass btn-sm">+ Нова мова / шифр</button>
@@ -321,7 +321,7 @@
           <form id="dmAddCharForm" class="dm-add-char-form">
             <input type="text" id="newCharName" placeholder="Ім'я нового героя" required />
             <input type="text" id="newCharTitle" placeholder="Титул або клас" />
-            <input type="text" id="newCharIcon" value="🛡️" maxlength="4" class="input-icon" />
+            <input type="text" id="newCharIcon" value="❖" maxlength="4" class="input-icon" />
             <input type="color" id="newCharColor" value="#c89d54" class="input-color" />
             <button type="submit" class="btn btn-sm btn-arcane">+ Додати героя</button>
           </form>
@@ -335,9 +335,9 @@
             <h2>Хроніка та Рунічні Написи</h2>
           </div>
           <div class="chat-header-tools">
-            <span id="chatWritingLangBadge" class="lang-badge">🗣️ Загальна</span>
+            <span id="chatWritingLangBadge" class="lang-badge">◈ Загальна</span>
             <button id="clearChatBtn" type="button" class="btn btn-sm btn-danger hidden" title="Очистити всю хроніку повідомлень">
-              🗑️ Очистити хроніку
+              Очистити хроніку
             </button>
           </div>
         </div>
@@ -352,7 +352,7 @@
           <div id="dmHandoutControls" class="dm-handout-controls hidden">
             <label class="checkbox-inline">
               <input type="checkbox" id="isHandoutCheck" />
-              <span>📜 Надіслати як Древній Свиток або напис</span>
+              <span>Надіслати як Древній Свиток або напис</span>
             </label>
             <input type="text" id="handoutTitleInput" class="hidden" placeholder="Заголовок напису (напр. Обеліск у трюмі)" />
           </div>
