@@ -85,6 +85,18 @@
     return !transport || transport.state !== TRANSPORT_STATE.DIRECT;
   }
 
+  /**
+   * VAD runs every ~20 ms; sending every tick floods the server speaking bucket
+   * and inflates rejectedMessages. Only state changes and audible level moves
+   * are worth signalling, at most 10 times per second.
+   */
+  function shouldSendSpeakingUpdate(prev, isSpeaking, level, nowMs) {
+    if (!prev || isSpeaking !== prev.isSpeaking) return true;
+    if (!isSpeaking) return false;
+    if (nowMs - prev.at < 100) return false;
+    return Math.abs(level - prev.level) >= 0.05;
+  }
+
   /** Attaches a session epoch to signaling payloads without losing WebIDL fields. */
   function withEpoch(value, epoch) {
     if (!value) return value;
@@ -279,6 +291,7 @@
     capIceQueue,
     shouldSendRelay,
     shouldPlayRelay,
+    shouldSendSpeakingUpdate,
     withEpoch,
     TransportStateMachine,
     PerfectNegotiator

@@ -9,6 +9,7 @@ const {
   capIceQueue,
   shouldSendRelay,
   shouldPlayRelay,
+  shouldSendSpeakingUpdate,
   withEpoch,
   TransportStateMachine,
   PerfectNegotiator
@@ -76,6 +77,15 @@ test('inbound relay audio stops once direct audio is confirmed', () => {
   assert.equal(shouldPlayRelay('a', peers, transports), true);
   transports.get('a').state = TRANSPORT_STATE.DIRECT;
   assert.equal(shouldPlayRelay('a', peers, transports), false, 'no duplicate audio after connect');
+});
+
+test('speaking updates are throttled instead of sent on every VAD tick', () => {
+  assert.equal(shouldSendSpeakingUpdate(null, false, 0, 0), true, 'initial state is sent');
+  const sent = { at: 1000, isSpeaking: true, level: 0.3 };
+  assert.equal(shouldSendSpeakingUpdate(sent, true, 0.31, 1020), false, 'same state is suppressed');
+  assert.equal(shouldSendSpeakingUpdate(sent, true, 0.31, 1100), false, 'tiny level change is ignored');
+  assert.equal(shouldSendSpeakingUpdate(sent, true, 0.5, 1100), true, 'audible level change is sent');
+  assert.equal(shouldSendSpeakingUpdate(sent, false, 0, 1010), true, 'silence change is immediate');
 });
 
 test('withEpoch preserves WebIDL description/candidate fields on the prototype', () => {

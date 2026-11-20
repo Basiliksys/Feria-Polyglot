@@ -614,9 +614,14 @@
       const gatedStream = await audioEngine.setLocalStream(newStream);
       state.outgoingStream = gatedStream || newStream;
 
+      let lastSpeakingSent = null;
       audioEngine.onLocalSpeakingChange = (isSpeaking, level) => {
         $('micLevelBar').style.width = `${Math.round(level * 100)}%`;
-        wsSend({ type: 'SPEAKING_STATE', isSpeaking, level });
+        const now = Date.now();
+        if (window.PeerSession.shouldSendSpeakingUpdate(lastSpeakingSent, isSpeaking, level, now)) {
+          lastSpeakingSent = { at: now, isSpeaking, level };
+          wsSend({ type: 'SPEAKING_STATE', isSpeaking, level });
+        }
         const selfCard = document.querySelector('.peer-card.self-card');
         if (selfCard) selfCard.classList.toggle('speaking', isSpeaking);
       };

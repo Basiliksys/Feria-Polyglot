@@ -103,6 +103,7 @@ Render без платної persistent disk перезаписує файлов
 - Свіжість сигналінгу визначається за серверним `fromClientId` (після реконнекту ID новий) і повним скиданням PC/ICE/negotiator на новому `JOIN_SUCCESS` — клієнтський `epoch` більше не порівнюється між гравцями. Асинхронні помилки signaling/медіа не залишаються unhandled.
 - Релей — не «липкий» стан: він залишається увімкненим для всіх станів, крім підтвердженого прямого зв'язку (`connected`), тому гравці за NAT не зависають на «Перепідключення...». Вхідні PCM-кадри одразу перемикають транспорт у `relay`, але **не скасовують активну спробу ICE**: без цього безперервна мова щоразу відкладала б backoff і гравець лишався б у ретрансляторі назавжди. Періодичні спроби ICE повертають прямий зв'язок. Зниклі гравці видаляються з UI/аудіо/PC-карт разом із таймерами та чергами ICE.
 - Клієнт бере ICE-конфіг з `GET /api/rtc-config`: окрім STUN там завжди є **TURN** (публічний OpenRelay або власний через env). Без TURN гравці за симетричним NAT взагалі не можуть вийти з ретранслятора — самого backoff ICE недостатньо. Конфіг завантажується до входу в кімнату, тому нові `RTCPeerConnection` одразу знають про TURN.
+- `SPEAKING_STATE` більше не шлемо кожні 20 мс: зміна стану відправляється одразу, а рівень — не частіше 10 раз/с і лише при зміні ≥0.05. Це прибрало постійне зростання `rejectedMessages` у health (ліміт speaking — 20/с).
 - Додано globals-індикатор стану WS у шапці «Голосової зали» (`online / connecting / syncing / reconnecting / offline`), нові стани точок з'єднання та ARIA-підписи кнопок гравців. Гучність/mute більше не застосовуються при кожному ререндері: префи зберігаються в рушії і виживають заміну ланцюга/реконект.
 - Усі обіцянки обробників WS та WebRTC мають `catch`; черга ICE обмежена (64 кандидати), застарілі PC-генерації ігнорують пізні колбеки.
 
@@ -110,7 +111,7 @@ Render без платної persistent disk перезаписує файлов
 
 ```bash
 npm ci
-npm test      # 62 тести: deploy config, security hardening, WS/reconnect/WebRTC-сесія, audio worklet/engine/buses, relay protocol, rules, state-store, validation, Render-style integration
+npm test      # 63 тести: deploy config, security hardening, WS/reconnect/WebRTC-сесія, audio worklet/engine/buses, relay protocol, rules, state-store, validation, Render-style integration
 npm start
 ```
 
@@ -118,7 +119,7 @@ npm start
 
 ### Чек-лист викладу (Phase 4)
 
-1. `npm ci && npm test` локально — усі тести мають бути зеленими (зараз 62).
+1. `npm ci && npm test` локально — усі тести мають бути зеленими (зараз 63).
 2. Створіть Upstash Redis REST і тримайте URL/токен готовим; PIN не зберігайте в репо.
 3. Створіть сервіс із `render.yaml` (або вручну: Node 22, `npm ci`, `npm start`, `/api/health`, **1 інстанс**, без диска) і заповніть `sync: false` змінні в Dashboard.
 4. Після першого деплою відкрийте `https://<service>.onrender.com/api/health`: `status: ok`, `storageMode: upstash`, `clients: 0`, `lastSyncAt` не порожній.
