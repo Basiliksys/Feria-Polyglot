@@ -111,6 +111,7 @@ h3 {
   color: #141009;
   border-color: var(--bright-brass);
   font-weight: 600;
+  text-shadow: none;
 }
 
 .btn-brass:hover {

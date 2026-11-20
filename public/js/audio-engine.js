@@ -102,14 +102,14 @@ class PolyglotAudioEngine {
       source.connect(inputNode);
     }
 
-    // Input cleanup: strip low mic rumble & high electrical hiss
+    // Input cleanup: strip sub-bass rumble while keeping full 75Hz-12kHz vocal clarity
     const hpFilter = ctx.createBiquadFilter();
     hpFilter.type = 'highpass';
-    hpFilter.frequency.value = 95;
+    hpFilter.frequency.value = 75;
 
     const lpFilter = ctx.createBiquadFilter();
     lpFilter.type = 'lowpass';
-    lpFilter.frequency.value = 7200;
+    lpFilter.frequency.value = 12000;
 
     inputNode.connect(hpFilter);
     hpFilter.connect(lpFilter);
@@ -124,14 +124,14 @@ class PolyglotAudioEngine {
     filter.frequency.value = 1000;
     filter.Q.value = 1.2;
 
-    // Simple LFO-modulated chorus
+    // Gentle LFO-modulated chorus (sub-millisecond sweep to avoid pitch wobble)
     const chorusDelay = ctx.createDelay(0.1);
     chorusDelay.delayTime.value = 0.018;
     const chorusLfo = ctx.createOscillator();
     chorusLfo.type = 'sine';
-    chorusLfo.frequency.value = 1.8;
+    chorusLfo.frequency.value = 0.65;
     const chorusLfoGain = ctx.createGain();
-    chorusLfoGain.gain.value = 0.004;
+    chorusLfoGain.gain.value = 0.00045;
     chorusLfo.connect(chorusLfoGain);
     chorusLfoGain.connect(chorusDelay.delayTime);
     chorusLfo.start();
@@ -232,23 +232,23 @@ class PolyglotAudioEngine {
     }
 
     if (mode === 'ATMOSPHERIC') {
-      const atmo = Math.max(0.08, Math.min(0.4, p.atmosphereMix || 0.22));
-      chain.dryGain.gain.setTargetAtTime(0.25, now, tau);
-      chain.processedGain.gain.setTargetAtTime(0.85, now, tau);
+      // Pure direct voice with zero AudioWorklet comb filtering + subtle room ambience
+      chain.dryGain.gain.setTargetAtTime(1.0, now, tau);
+      chain.processedGain.gain.setTargetAtTime(0.0, now, tau);
 
       params.get('scrambleAmount').setTargetAtTime(0.0, now, tau);
       params.get('grainSizeMs').setTargetAtTime(p.grainSizeMs || 145, now, tau);
       params.get('pitchRatio').setTargetAtTime(1.0, now, tau);
-      params.get('subOctaveMix').setTargetAtTime((p.subOctaveMix || 0) * atmo * 1.3, now, tau);
+      params.get('subOctaveMix').setTargetAtTime((p.subOctaveMix || 0) >= 0.3 ? 0.12 : 0.0, now, tau);
       params.get('ringModHz').setTargetAtTime(p.ringModHz || 0, now, tau);
-      params.get('ringModMix').setTargetAtTime((p.ringModMix || 0) * atmo * 1.1, now, tau);
+      params.get('ringModMix').setTargetAtTime(0.0, now, tau);
 
       chain.filter.type = p.filterType === 'bandpass' ? 'peaking' : (p.filterType || 'allpass');
       chain.filter.frequency.setTargetAtTime(Math.max(120, Math.min(8000, p.filterFreq || 1200)), now, tau);
-      chain.filter.gain.setTargetAtTime(4.0, now, tau);
+      chain.filter.gain.setTargetAtTime(3.0, now, tau);
 
-      chain.chorusWetGain.gain.setTargetAtTime((p.chorusMix || 0) * atmo * 1.4, now, tau);
-      chain.reverbWetGain.gain.setTargetAtTime((p.reverbMix || 0) * atmo * 1.6, now, tau);
+      chain.chorusWetGain.gain.setTargetAtTime(Math.min(0.08, (p.chorusMix || 0) * 0.18), now, tau);
+      chain.reverbWetGain.gain.setTargetAtTime(Math.min(0.14, (p.reverbMix || 0) * 0.25), now, tau);
       return;
     }
 
@@ -430,14 +430,14 @@ class PolyglotAudioEngine {
 
     this.localHpFilter = ctx.createBiquadFilter();
     this.localHpFilter.type = 'highpass';
-    this.localHpFilter.frequency.value = 90;
+    this.localHpFilter.frequency.value = 75;
 
     this.localLpFilter = ctx.createBiquadFilter();
     this.localLpFilter.type = 'lowpass';
-    this.localLpFilter.frequency.value = 7500;
+    this.localLpFilter.frequency.value = 12000;
 
     this.localGateGain = ctx.createGain();
-    this.localGateGain.gain.value = 0.0;
+    this.localGateGain.gain.value = 0.12;
 
     this.localDest = ctx.createMediaStreamDestination();
     this.localAnalyser = ctx.createAnalyser();
@@ -515,24 +515,24 @@ class PolyglotAudioEngine {
       const level = Math.min(1, rms * 8);
       const now = Date.now();
 
-      // Compare against noiseGateThreshold
+      // Soft expander instead of hard walkie-talkie squelch
       if (rms >= this.noiseGateThreshold || peak >= this.noiseGateThreshold * 1.8) {
-        this.gateHoldUntil = now + 200;
+        this.gateHoldUntil = now + 420;
         this.lastSpeakingAt = now;
       }
 
       const gateOpenNow = now < this.gateHoldUntil;
       if (gateOpenNow !== this.localGateOpen) {
         this.localGateOpen = gateOpenNow;
-        this.localGateGain?.gain.setTargetAtTime(gateOpenNow ? 1.0 : 0.0, ctx.currentTime, gateOpenNow ? 0.005 : 0.055);
+        this.localGateGain?.gain.setTargetAtTime(gateOpenNow ? 1.0 : 0.12, ctx.currentTime, gateOpenNow ? 0.005 : 0.18);
       }
 
-      const isSpeaking = gateOpenNow || (now - this.lastSpeakingAt < 300);
+      const isSpeaking = gateOpenNow || (now - this.lastSpeakingAt < 350);
       if (isSpeaking !== this.lastSpeakingState || isSpeaking) {
         this.lastSpeakingState = isSpeaking;
         this.onLocalSpeakingChange?.(isSpeaking, Number(level.toFixed(2)));
       }
-    }, 30);
+    }, 20);
 
     if (this.selfMonitorEnabled) {
       await this.enableSelfMonitor(true);

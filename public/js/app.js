@@ -27,6 +27,7 @@
     peerSenders: new Map(), // clientId -> RTCRtpSender
     peerConnStates: new Map(), // clientId -> 'connecting' | 'connected' | 'relay'
     peerConnTimers: new Map(), // clientId -> timeout id
+    pendingIceCandidates: new Map(), // clientId -> RTCIceCandidateInit[]
     relayTargetIds: new Set(),
     peerPrefs: loadPeerPrefs(), // charKey -> { volume, muted }
     messages: [],
@@ -36,6 +37,7 @@
     micEnabled: false,
     hoveredLanguageId: null,
     replyPromptLang: null,
+    replyPromptTimer: null,
     whisperTarget: null, // { clientId, characterId, name }
     latestSnapshot: null,
     pendingBackupSnapshot: null,
@@ -214,10 +216,12 @@
         renderChatMessages();
         updateActiveLanguageVisuals();
 
-        // Initialize microphone & WebRTC connections
+        // Initialize microphone & WebRTC connections (only for peers without an already-active PC)
         await initLocalAudio();
         for (const peer of state.peers.values()) {
-          setupPeerConnection(peer.clientId);
+          if (!state.peerConnections.has(peer.clientId)) {
+            setupPeerConnection(peer.clientId);
+          }
         }
         break;
 
@@ -501,7 +505,7 @@
     $('noiseGateSlider').value = String(clamped);
     $('noiseGateLabel').textContent = `${clamped}%`;
     $('micGateMarker').style.left = `${clamped}%`;
-    const threshold = clamped === 0 ? 0.001 : 0.003 + (clamped / 100) * 0.075;
+    const threshold = clamped === 0 ? 0.0005 : 0.0005 + Math.pow(clamped / 100, 1.5) * 0.0245;
     audioEngine.setNoiseGateThreshold(threshold);
     try { localStorage.setItem(LS_KEYS.NOISE_GATE, String(clamped)); } catch {}
   }
@@ -565,7 +569,7 @@
     return '🟡 З’єднання...';
   }
 
-  async function setupPeerConnection(peerId) {
+  async function setupPeerConnection(peerId, forceInitiator = false) {
     cleanupPeerConnection(peerId);
     setPeerConnState(peerId, 'connecting');
 
@@ -588,7 +592,7 @@
       if (st !== 'connected') {
         setPeerConnState(peerId, 'relay');
       }
-    }, 6000);
+    }, 12000);
     state.peerConnTimers.set(peerId, fallbackTimer);
 
     const checkConnection = () => {
@@ -620,21 +624,32 @@
       audioEngine.setPeerMuted(peerId, pref.muted);
     };
 
-    // Deterministic initiator to prevent WebRTC offer glare
-    if (state.clientId < peerId) {
+    if (forceInitiator || state.clientId < peerId) {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       wsSend({ type: 'WEBRTC_OFFER', targetClientId: peerId, payload: offer });
     }
   }
 
+  async function flushPendingIce(peerId, pc) {
+    const queued = state.pendingIceCandidates.get(peerId);
+    if (!queued || queued.length === 0) return;
+    state.pendingIceCandidates.delete(peerId);
+    for (const cand of queued) {
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(cand));
+      } catch {}
+    }
+  }
+
   async function handleWebRtcOffer(fromPeerId, offer) {
     let pc = state.peerConnections.get(fromPeerId);
     if (!pc) {
-      await setupPeerConnection(fromPeerId);
+      await setupPeerConnection(fromPeerId, false);
       pc = state.peerConnections.get(fromPeerId);
     }
     await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    await flushPendingIce(fromPeerId, pc);
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     wsSend({ type: 'WEBRTC_ANSWER', targetClientId: fromPeerId, payload: answer });
@@ -644,11 +659,18 @@
     const pc = state.peerConnections.get(fromPeerId);
     if (!pc) return;
     await pc.setRemoteDescription(new RTCSessionDescription(answer));
+    await flushPendingIce(fromPeerId, pc);
   }
 
   async function handleWebRtcIce(fromPeerId, candidate) {
     const pc = state.peerConnections.get(fromPeerId);
-    if (!pc) return;
+    if (!pc || !pc.remoteDescription || !pc.remoteDescription.type) {
+      if (!state.pendingIceCandidates.has(fromPeerId)) {
+        state.pendingIceCandidates.set(fromPeerId, []);
+      }
+      state.pendingIceCandidates.get(fromPeerId).push(candidate);
+      return;
+    }
     try {
       await pc.addIceCandidate(new RTCIceCandidate(candidate));
     } catch {}
@@ -658,6 +680,7 @@
     clearTimeout(state.peerConnTimers.get(peerId));
     state.peerConnTimers.delete(peerId);
     state.peerConnStates.delete(peerId);
+    state.pendingIceCandidates.delete(peerId);
     state.relayTargetIds.delete(peerId);
     audioEngine.setRelayTargetsCount(state.relayTargetIds.size);
     audioEngine.detachPeerStream(peerId);
@@ -671,7 +694,7 @@
 
   async function reconnectPeer(peerId) {
     showToast('🔄 Перепідключення аудіо-з’єднання...');
-    await setupPeerConnection(peerId);
+    await setupPeerConnection(peerId, true);
     renderPeersGrid();
   }
 
@@ -835,13 +858,25 @@
   }
 
   function checkReplyPromptForPeer(peer) {
-    if (!peer || peer.languageId === 'common') return;
-    if (!peer.understood || !peer.canReplyInLanguage) return;
+    if (!peer || peer.languageId === 'common' || !peer.understood || !peer.canReplyInLanguage) {
+      if (state.replyPromptLang && peer && state.replyPromptLang.clientId === peer.clientId) {
+        clearTimeout(state.replyPromptTimer);
+        state.replyPromptLang = null;
+        $('replyPromptBanner').classList.add('hidden');
+      }
+      return;
+    }
     if (state.activeLanguageId === peer.languageId) return;
 
     state.replyPromptLang = peer;
     $('replyPromptText').innerHTML = `🔔 <strong>${escapeHtml(peer.displayName)}</strong> говорить мовою <strong>${peer.languageIcon} ${escapeHtml(peer.languageName)}</strong>!`;
     $('replyPromptBanner').classList.remove('hidden');
+
+    clearTimeout(state.replyPromptTimer);
+    state.replyPromptTimer = setTimeout(() => {
+      $('replyPromptBanner').classList.add('hidden');
+      state.replyPromptLang = null;
+    }, 10000);
   }
 
   $('replyPromptAcceptBtn').addEventListener('click', () => {
