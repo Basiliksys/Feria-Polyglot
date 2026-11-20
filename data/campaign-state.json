@@ -324,7 +324,7 @@
       "title": "Маг Вищого Чародійства",
       "icon": "🔮",
       "avatarColor": "#a855f7",
-      "languages": ["common", "draconic", "elvish", "infernal", "kiros_ancient"],
+      "languages": ["common", "draconic", "elvish", "infernal"],
       "comprehendLanguages": false,
       "tongues": false,
       "forcedLanguage": null
@@ -335,7 +335,7 @@
       "title": "Шукач Саркофага",
       "icon": "⚔️",
       "avatarColor": "#ef4444",
-      "languages": ["common", "abyssal", "infernal", "kiros_ancient", "undercommon"],
+      "languages": ["common", "abyssal", "infernal", "undercommon"],
       "comprehendLanguages": false,
       "tongues": false,
       "forcedLanguage": null
