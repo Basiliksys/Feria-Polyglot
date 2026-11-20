@@ -34,13 +34,13 @@ async function startFakeKv() {
     req.on('data', (chunk) => { body += chunk; });
     req.on('end', () => {
       try {
-        const [command] = JSON.parse(body);
+        const command = JSON.parse(body);
         const [name, key, value] = command;
         res.setHeader('content-type', 'application/json');
-        if (name === 'GET') res.end(JSON.stringify([{ result: kv.has(key) ? kv.get(key) : null }]));
+        if (name === 'GET') res.end(JSON.stringify({ result: kv.has(key) ? kv.get(key) : null }));
         else if (name === 'SET') {
           kv.set(key, value);
-          res.end(JSON.stringify([{ result: 'OK' }]));
+          res.end(JSON.stringify({ result: 'OK' }));
         } else {
           res.statusCode = 400;
           res.end(JSON.stringify([{ error: 'unsupported' }]));

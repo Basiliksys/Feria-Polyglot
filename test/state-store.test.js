@@ -19,15 +19,18 @@ function tempDir() {
 function fakeFetch(kv) {
   const calls = [];
   const fetchImpl = async (_url, options) => {
-    const [command] = JSON.parse(options.body);
+    const command = JSON.parse(options.body);
+    // Guard against regressing to the pipeline body format, which Upstash
+    // rejects with HTTP 400.
+    assert.ok(Array.isArray(command) && typeof command[0] === 'string');
     calls.push(command);
     const [name, key, value] = command;
     if (name === 'GET') {
-      return { ok: true, json: async () => [{ result: kv[key] ?? null }] };
+      return { ok: true, json: async () => ({ result: kv[key] ?? null }) };
     }
     if (name === 'SET') {
       kv[key] = value;
-      return { ok: true, json: async () => [{ result: 'OK' }] };
+      return { ok: true, json: async () => ({ result: 'OK' }) };
     }
     throw new Error(`Unexpected command ${name}`);
   };

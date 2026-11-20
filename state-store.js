@@ -260,7 +260,10 @@ class CampaignStore {
           Authorization: `Bearer ${this.token}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify([command]),
+        // Upstash REST expects one flat command array per request, e.g.
+        // ["SET","key","value"]. A nested array is the pipeline format and
+        // returns HTTP 400 from the live API.
+        body: JSON.stringify(command),
         signal: controller.signal
       });
       if (!res.ok) throw new Error(`Upstash HTTP ${res.status}`);
