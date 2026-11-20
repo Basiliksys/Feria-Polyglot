@@ -1,0 +1,29 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+# One web instance only: the participant registry and WebRTC signaling are kept
+# in process memory, so multiple instances would see different player lists.
+# Campaign state lives in Upstash Redis REST (no persistent disk required).
+services:
+  - type: web
+    name: feria-polyglot
+    runtime: node
+    plan: free # use 0.5c-512mb (starter) if free web services are unavailable
+    numInstances: 1
+    region: oregon
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/health
+    maxShutdownDelaySeconds: 20 # enough time to flush state on SIGTERM
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      - key: FERIA_DM_PIN
+        sync: false # prompt in the Render Dashboard; never commit the PIN
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
+      - key: STATE_KEY
+        value: feria:campaign-state
