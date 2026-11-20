@@ -1,0 +1,366 @@
+{
+  "dmPin": "1250",
+  "languages": [
+    {
+      "id": "common",
+      "name": "Загальна",
+      "category": "standard",
+      "color": "#e2e8f0",
+      "icon": "🗣️",
+      "scriptStyle": "common",
+      "dspPreset": {
+        "grainSizeMs": 140,
+        "pitchRatio": 1.0,
+        "formantShiftHz": 0,
+        "subOctaveMix": 0,
+        "ringModHz": 0,
+        "ringModMix": 0,
+        "reverbMix": 0,
+        "chorusMix": 0,
+        "filterType": "allpass",
+        "filterFreq": 1000,
+        "atmosphereMix": 0
+      }
+    },
+    {
+      "id": "elvish",
+      "name": "Ельфійська",
+      "category": "standard",
+      "color": "#34d399",
+      "icon": "🌿",
+      "scriptStyle": "elvish",
+      "dspPreset": {
+        "grainSizeMs": 155,
+        "pitchRatio": 1.18,
+        "formantShiftHz": 320,
+        "subOctaveMix": 0,
+        "ringModHz": 0,
+        "ringModMix": 0,
+        "reverbMix": 0.42,
+        "chorusMix": 0.45,
+        "filterType": "highshelf",
+        "filterFreq": 2200,
+        "atmosphereMix": 0.22
+      }
+    },
+    {
+      "id": "dwarvish",
+      "name": "Дворфійська",
+      "category": "standard",
+      "color": "#f59e0b",
+      "icon": "⚒️",
+      "scriptStyle": "runic",
+      "dspPreset": {
+        "grainSizeMs": 125,
+        "pitchRatio": 0.84,
+        "formantShiftHz": -260,
+        "subOctaveMix": 0.22,
+        "ringModHz": 0,
+        "ringModMix": 0,
+        "reverbMix": 0.28,
+        "chorusMix": 0.1,
+        "filterType": "lowshelf",
+        "filterFreq": 320,
+        "atmosphereMix": 0.2
+      }
+    },
+    {
+      "id": "draconic",
+      "name": "Драконяча",
+      "category": "exotic",
+      "color": "#ef4444",
+      "icon": "🐉",
+      "scriptStyle": "draconic",
+      "dspPreset": {
+        "grainSizeMs": 165,
+        "pitchRatio": 0.78,
+        "formantShiftHz": -340,
+        "subOctaveMix": 0.35,
+        "ringModHz": 42,
+        "ringModMix": 0.14,
+        "reverbMix": 0.48,
+        "chorusMix": 0.15,
+        "filterType": "lowshelf",
+        "filterFreq": 420,
+        "atmosphereMix": 0.24
+      }
+    },
+    {
+      "id": "infernal",
+      "name": "Інфернальна",
+      "category": "exotic",
+      "color": "#dc2626",
+      "icon": "🔥",
+      "scriptStyle": "infernal",
+      "dspPreset": {
+        "grainSizeMs": 150,
+        "pitchRatio": 0.74,
+        "formantShiftHz": -380,
+        "subOctaveMix": 0.45,
+        "ringModHz": 58,
+        "ringModMix": 0.26,
+        "reverbMix": 0.52,
+        "chorusMix": 0.2,
+        "filterType": "bandpass",
+        "filterFreq": 750,
+        "atmosphereMix": 0.25
+      }
+    },
+    {
+      "id": "abyssal",
+      "name": "Абіссальна",
+      "category": "exotic",
+      "color": "#991b1b",
+      "icon": "💀",
+      "scriptStyle": "infernal",
+      "dspPreset": {
+        "grainSizeMs": 115,
+        "pitchRatio": 0.72,
+        "formantShiftHz": -420,
+        "subOctaveMix": 0.5,
+        "ringModHz": 85,
+        "ringModMix": 0.34,
+        "reverbMix": 0.56,
+        "chorusMix": 0.25,
+        "filterType": "bandpass",
+        "filterFreq": 620,
+        "atmosphereMix": 0.25
+      }
+    },
+    {
+      "id": "druidic",
+      "name": "Друїдична",
+      "category": "exotic",
+      "color": "#10b981",
+      "icon": "🍃",
+      "scriptStyle": "druidic",
+      "dspPreset": {
+        "grainSizeMs": 170,
+        "pitchRatio": 1.09,
+        "formantShiftHz": 180,
+        "subOctaveMix": 0.08,
+        "ringModHz": 18,
+        "ringModMix": 0.08,
+        "reverbMix": 0.45,
+        "chorusMix": 0.42,
+        "filterType": "bandpass",
+        "filterFreq": 1450,
+        "atmosphereMix": 0.22
+      }
+    },
+    {
+      "id": "primordial",
+      "name": "Первинна",
+      "category": "exotic",
+      "color": "#06b6d4",
+      "icon": "🌊",
+      "scriptStyle": "runic",
+      "dspPreset": {
+        "grainSizeMs": 185,
+        "pitchRatio": 0.91,
+        "formantShiftHz": -150,
+        "subOctaveMix": 0.25,
+        "ringModHz": 28,
+        "ringModMix": 0.16,
+        "reverbMix": 0.62,
+        "chorusMix": 0.5,
+        "filterType": "lowpass",
+        "filterFreq": 1950,
+        "atmosphereMix": 0.24
+      }
+    },
+    {
+      "id": "deep_speech",
+      "name": "Глибинна мова",
+      "category": "exotic",
+      "color": "#a855f7",
+      "icon": "👁️",
+      "scriptStyle": "alien",
+      "dspPreset": {
+        "grainSizeMs": 195,
+        "pitchRatio": 0.86,
+        "formantShiftHz": -220,
+        "subOctaveMix": 0.32,
+        "ringModHz": 115,
+        "ringModMix": 0.32,
+        "reverbMix": 0.68,
+        "chorusMix": 0.65,
+        "filterType": "bandpass",
+        "filterFreq": 1100,
+        "atmosphereMix": 0.25
+      }
+    },
+    {
+      "id": "celestial",
+      "name": "Небесна",
+      "category": "exotic",
+      "color": "#fde047",
+      "icon": "✨",
+      "scriptStyle": "elvish",
+      "dspPreset": {
+        "grainSizeMs": 175,
+        "pitchRatio": 1.24,
+        "formantShiftHz": 420,
+        "subOctaveMix": 0,
+        "ringModHz": 0,
+        "ringModMix": 0,
+        "reverbMix": 0.64,
+        "chorusMix": 0.6,
+        "filterType": "highshelf",
+        "filterFreq": 2600,
+        "atmosphereMix": 0.22
+      }
+    },
+    {
+      "id": "thieves_cant",
+      "name": "Злодійський жаргон",
+      "category": "exotic",
+      "color": "#64748b",
+      "icon": "🗝️",
+      "scriptStyle": "cipher",
+      "dspPreset": {
+        "grainSizeMs": 110,
+        "pitchRatio": 1.04,
+        "formantShiftHz": 90,
+        "subOctaveMix": 0,
+        "ringModHz": 0,
+        "ringModMix": 0,
+        "reverbMix": 0.14,
+        "chorusMix": 0.12,
+        "filterType": "bandpass",
+        "filterFreq": 1600,
+        "atmosphereMix": 0.18
+      }
+    },
+    {
+      "id": "undercommon",
+      "name": "Підземна загальна",
+      "category": "exotic",
+      "color": "#6366f1",
+      "icon": "🕳️",
+      "scriptStyle": "alien",
+      "dspPreset": {
+        "grainSizeMs": 135,
+        "pitchRatio": 0.94,
+        "formantShiftHz": -120,
+        "subOctaveMix": 0.15,
+        "ringModHz": 36,
+        "ringModMix": 0.12,
+        "reverbMix": 0.55,
+        "chorusMix": 0.3,
+        "filterType": "lowpass",
+        "filterFreq": 2100,
+        "atmosphereMix": 0.2
+      }
+    },
+    {
+      "id": "kiros_ancient",
+      "name": "Давня мова Кіросу",
+      "category": "feria",
+      "color": "#c084fc",
+      "icon": "🕯️",
+      "scriptStyle": "ancient",
+      "dspPreset": {
+        "grainSizeMs": 205,
+        "pitchRatio": 0.88,
+        "formantShiftHz": -180,
+        "subOctaveMix": 0.28,
+        "ringModHz": 48,
+        "ringModMix": 0.18,
+        "reverbMix": 0.65,
+        "chorusMix": 0.4,
+        "filterType": "bandpass",
+        "filterFreq": 980,
+        "atmosphereMix": 0.24
+      }
+    },
+    {
+      "id": "niman_cipher",
+      "name": "Імперський Шифр Німану",
+      "category": "feria",
+      "color": "#94a3b8",
+      "icon": "⚙️",
+      "scriptStyle": "imperial",
+      "dspPreset": {
+        "grainSizeMs": 120,
+        "pitchRatio": 0.96,
+        "formantShiftHz": -60,
+        "subOctaveMix": 0.12,
+        "ringModHz": 140,
+        "ringModMix": 0.22,
+        "reverbMix": 0.2,
+        "chorusMix": 0.08,
+        "filterType": "bandpass",
+        "filterFreq": 1500,
+        "atmosphereMix": 0.2
+      }
+    },
+    {
+      "id": "steppe_turs",
+      "name": "Степова говірка Турсу",
+      "category": "feria",
+      "color": "#d97706",
+      "icon": "🐎",
+      "scriptStyle": "steppe",
+      "dspPreset": {
+        "grainSizeMs": 130,
+        "pitchRatio": 0.92,
+        "formantShiftHz": -140,
+        "subOctaveMix": 0.1,
+        "ringModHz": 0,
+        "ringModMix": 0,
+        "reverbMix": 0.24,
+        "chorusMix": 0.15,
+        "filterType": "lowshelf",
+        "filterFreq": 520,
+        "atmosphereMix": 0.18
+      }
+    }
+  ],
+  "characters": [
+    {
+      "id": "amenemhet",
+      "name": "Аменемхет-Кемі",
+      "title": "Маг Вищого Чародійства",
+      "icon": "🔮",
+      "avatarColor": "#a855f7",
+      "languages": ["common", "draconic", "elvish", "infernal", "kiros_ancient"],
+      "comprehendLanguages": false,
+      "tongues": false,
+      "forcedLanguage": null
+    },
+    {
+      "id": "adrian",
+      "name": "Адріан Морвейн",
+      "title": "Шукач Саркофага",
+      "icon": "⚔️",
+      "avatarColor": "#ef4444",
+      "languages": ["common", "abyssal", "infernal", "kiros_ancient", "undercommon"],
+      "comprehendLanguages": false,
+      "tongues": false,
+      "forcedLanguage": null
+    },
+    {
+      "id": "liora",
+      "name": "Ліора",
+      "title": "Друїд / Стихійний вогонь",
+      "icon": "🔥",
+      "avatarColor": "#10b981",
+      "languages": ["common", "druidic", "primordial", "elvish"],
+      "comprehendLanguages": false,
+      "tongues": false,
+      "forcedLanguage": null
+    },
+    {
+      "id": "vulkan",
+      "name": "Вулкан Гросміт",
+      "title": "Майстер Гільдії",
+      "icon": "🛠️",
+      "avatarColor": "#f59e0b",
+      "languages": ["common", "dwarvish", "niman_cipher", "draconic"],
+      "comprehendLanguages": false,
+      "tongues": false,
+      "forcedLanguage": null
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "feria-voice",
+  "version": "1.0.0",
+  "description": "Feria Polyglot — Веб-застосунок мовної механіки D&D для Discord-сесій з миттєвим DSP-спотворенням, рунічним чатом та древніми написами",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "tunnel": "npx --yes localtunnel --port 3456"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "ws": "^8.18.0"
+  }
+}
