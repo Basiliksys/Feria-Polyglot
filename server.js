@@ -601,6 +601,8 @@ app.get('/api/lobby', (_req, res) => {
   res.json({
     dmOnline,
     buildId: BUILD_ID,
+    // Never advertise the seed PIN on a deployment with a configured secret.
+    defaultPin: DM_PIN ? null : String(state.dmPin || ''),
     characters: state.characters.map((c) => ({
       id: c.id,
       name: c.name,

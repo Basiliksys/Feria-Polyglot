@@ -143,6 +143,35 @@ function localEnv(port, dir, extra = {}) {
   };
 }
 
+test('lobby never advertises the seed PIN when an operator PIN is configured', { timeout: 30000 }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feria-pin-hint-'));
+  const port = await freePort();
+  const server = await startServer(localEnv(port, dir));
+  t.after(async () => {
+    await stopServer(server);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const res = await fetch(`http://127.0.0.1:${port}/api/lobby`);
+  const lobby = await res.json();
+  assert.equal(lobby.defaultPin, null, 'the browser must not receive a usable PIN');
+  assert.ok(!JSON.stringify(lobby).includes(PIN), 'the operator PIN is not leaked either');
+});
+
+test('lobby exposes the seed PIN only for a local passwordless server', { timeout: 30000 }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feria-pin-hint-local-'));
+  const port = await freePort();
+  const server = await startServer(localEnv(port, dir, { FERIA_DM_PIN: '' }));
+  t.after(async () => {
+    await stopServer(server);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const res = await fetch(`http://127.0.0.1:${port}/api/lobby`);
+  const lobby = await res.json();
+  assert.equal(lobby.defaultPin, '1250');
+});
+
 test('rtc config advertises TURN so players can escape symmetric NATs', { timeout: 30000 }, async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feria-rtc-'));
   const port = await freePort();

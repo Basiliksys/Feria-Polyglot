@@ -209,6 +209,12 @@
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       if (data.buildId) state.serverBuildId = data.buildId;
+      const pinHint = $('dmPinHint');
+      if (pinHint) {
+        pinHint.textContent = data.defaultPin
+          ? `Керування мовами світу, заклинаннями, свитками та хронікою. Локальний код: ${data.defaultPin}`
+          : 'Керування мовами світу, заклинаннями, свитками та хронікою. Код Майстра задано адміністратором сервера.';
+      }
       $('lobbyError').classList.add('hidden');
 
       const grid = $('lobbyCharacters');
