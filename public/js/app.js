@@ -694,7 +694,10 @@
     $('noiseGateSlider').value = String(clamped);
     $('noiseGateLabel').textContent = `${clamped}%`;
     $('micGateMarker').style.left = `${clamped}%`;
-    const threshold = clamped === 0 ? 0.0003 : 0.0003 + Math.pow(clamped / 100, 1.4) * 0.0147;
+    // The meter shows level = min(1, rms * 8). Put the marker at the same
+    // RMS value it points to, so 15% really means "close below 0.019 RMS"
+    // instead of the previous ~0.001 that left the gate permanently open.
+    const threshold = clamped === 0 ? 0.0003 : Math.min(0.15, clamped / 800);
     audioEngine.setNoiseGateThreshold(threshold);
     try { localStorage.setItem(LS_KEYS.NOISE_GATE, String(clamped)); } catch {}
   }

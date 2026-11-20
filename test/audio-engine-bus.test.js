@@ -98,7 +98,32 @@ class FakeAudioContext {
     node.buffer = null;
     return node;
   }
-  createMediaStreamSource() { return new FakeNode(this, 'source'); }
+  createMediaStreamSource(stream) {
+    const node = new FakeNode(this, 'source');
+    node.stream = stream;
+    return node;
+  }
+  createMediaStreamDestination() {
+    const node = new FakeNode(this, 'mediaStreamDestination');
+    node.stream = { getAudioTracks: () => [{ enabled: true }] };
+    return node;
+  }
+  createDynamicsCompressor() {
+    const node = new FakeNode(this, 'compressor');
+    for (const key of ['threshold', 'knee', 'ratio', 'attack', 'release']) {
+      node[key] = new FakeParam(0);
+    }
+    return node;
+  }
+  createAnalyser() {
+    const node = new FakeNode(this, 'analyser');
+    node.fftSize = 512;
+    node.getFloatTimeDomainData = (array) => {
+      const sample = this.testSample || 0;
+      for (let i = 0; i < array.length; i++) array[i] = sample;
+    };
+    return node;
+  }
   createBuffer(channels, length, rate) {
     const data = new Float32Array(length);
     return { getChannelData: () => data, duration: length / rate };
@@ -240,4 +265,38 @@ test('setNoiseGateThreshold updates every live bus', async () => {
     checked++;
   });
   assert.equal(checked, 2);
+});
+
+test('voice activity gates the outgoing stream and the self-monitor preview', async () => {
+  const engine = createEngine();
+  await engine.ensureInitialized();
+  engine.ctx.testSample = 0;
+  const rawStream = { getAudioTracks: () => [{ enabled: true }] };
+  const gatedStream = await engine.setLocalStream(rawStream);
+
+  try {
+    // Silence closes the gate after the first VAD tick.
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(engine.localGateOpen, false);
+    assert.equal(engine.localGateGain.gain.value, 0);
+
+    // Speech re-opens it; everything sent to WebRTC/relay sits after this gain.
+    engine.ctx.testSample = 0.08;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(engine.localGateOpen, true);
+    assert.equal(engine.localGateGain.gain.value, 1);
+
+    // Voice test must preview the gated stream, not the raw microphone.
+    await engine.enableSelfMonitor(true);
+    assert.equal(engine.selfMonitorChain.source.stream, gatedStream);
+
+    // The hold expires and the gate closes again in quiet passages.
+    engine.ctx.testSample = 0;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(engine.localGateOpen, false);
+    assert.equal(engine.localGateGain.gain.value, 0);
+  } finally {
+    await engine.enableSelfMonitor(false);
+    engine.teardownLocalPipeline();
+  }
 });

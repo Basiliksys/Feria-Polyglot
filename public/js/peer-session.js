@@ -103,6 +103,10 @@
       this.state = TRANSPORT_STATE.CONNECTING;
       this.relayAvailable = false;
       this.directAttempts = 0;
+      // True while an ICE restart is actually in flight. Inbound relay audio
+      // must not postpone that probe, otherwise continuous speech keeps the
+      // peer in relay forever.
+      this.probing = false;
       this.startedAt = nowMs;
       this.nextAttemptAt = Infinity;
     }
@@ -113,6 +117,7 @@
 
     noteDirectConnected(nowMs) {
       this.state = TRANSPORT_STATE.DIRECT;
+      this.probing = false;
       this.directAttempts = 0;
       this.nextAttemptAt = Infinity;
       this.lastDirectAt = nowMs;
@@ -120,16 +125,18 @@
 
     /**
      * Inbound relay audio proves a relay path exists. Switch to it immediately
-     * unless a healthy direct connection is already established — waiting for
-     * a fallback timer here leaves peers stuck in "reconnecting" with no audio.
+     * unless a healthy direct connection is established or an ICE probe is in
+     * flight — every PCM chunk arriving during a probe would otherwise reset
+     * the backoff and the peer would never leave relay.
      */
     noteRelayAvailable(nowMs) {
       this.relayAvailable = true;
-      if (this.state === TRANSPORT_STATE.DIRECT) return null;
+      if (this.state === TRANSPORT_STATE.DIRECT || this.probing) return null;
       return this.enterRelay(nowMs) ? 'use-relay' : null;
     }
 
     noteDirectFailure(nowMs) {
+      this.probing = false;
       if (this.relayAvailable) {
         this.enterRelay(nowMs);
       } else {
@@ -141,6 +148,7 @@
     enterRelay(nowMs) {
       if (this.state === TRANSPORT_STATE.RELAY) return false;
       this.state = TRANSPORT_STATE.RELAY;
+      this.probing = false;
       this.scheduleProbe(nowMs);
       return true;
     }
@@ -160,12 +168,14 @@
       // the periodic tick does not immediately issue a duplicate ICE restart.
       this.scheduleProbe(nowMs);
       this.state = TRANSPORT_STATE.RECONNECTING;
+      this.probing = true;
       return 'restart-ice';
     }
 
     /** Returns an action to perform ('use-relay' | 'restart-ice') or null. */
     tick(nowMs) {
       if (this.state === TRANSPORT_STATE.CONNECTING && nowMs - this.startedAt >= this.fallbackMs) {
+        this.probing = false;
         if (this.relayAvailable) {
           this.enterRelay(nowMs);
           return 'use-relay';
@@ -174,12 +184,14 @@
         // leaving the peer stuck in "connecting" forever.
         this.scheduleProbe(nowMs);
         this.state = TRANSPORT_STATE.RECONNECTING;
+        this.probing = true;
         return 'restart-ice';
       }
       if ((this.state === TRANSPORT_STATE.RECONNECTING || this.state === TRANSPORT_STATE.RELAY) &&
           nowMs >= this.nextAttemptAt) {
         this.state = TRANSPORT_STATE.CONNECTING;
         this.startedAt = nowMs;
+        this.probing = true;
         return 'restart-ice';
       }
       return null;

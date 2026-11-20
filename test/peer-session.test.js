@@ -102,8 +102,23 @@ test('transport state uses an available relay immediately and re-probes with bac
   assert.equal(sm.tick(599), null);
   assert.equal(sm.tick(600), 'restart-ice');
   assert.equal(sm.state, TRANSPORT_STATE.CONNECTING);
+  assert.equal(sm.probing, true);
 
-  // With relay already available, a direct failure returns to relay.
+  // Continuous relay speech during the probe must not postpone it forever.
+  const probeStartedAt = sm.nextAttemptAt;
+  assert.equal(sm.noteRelayAvailable(700), null);
+  assert.equal(sm.nextAttemptAt, probeStartedAt);
+  assert.equal(sm.state, TRANSPORT_STATE.CONNECTING);
+
+  // The probe keeps its 1 s window; only then does relay take over again and
+  // schedule the next, exponentially later attempt.
+  assert.equal(sm.tick(1599), null);
+  assert.equal(sm.tick(1600), 'use-relay');
+  assert.equal(sm.state, TRANSPORT_STATE.RELAY);
+  assert.equal(sm.probing, false);
+  assert.equal(sm.nextAttemptAt, 2600);
+
+  // With relay already available, a direct failure stays in relay.
   sm.noteDirectFailure(1600);
   assert.equal(sm.state, TRANSPORT_STATE.RELAY);
   assert.equal(sm.tick(2599), null);

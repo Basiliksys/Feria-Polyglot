@@ -528,6 +528,9 @@ class PolyglotAudioEngine {
     this.localMicActive = !!(initialTrack && initialTrack.enabled);
     this.localGateGain = ctx.createGain();
     this.localGateGain.gain.value = this.localMicActive ? 1.0 : 0.0;
+    // Keep the cached VAD state in sync with the initial gain, otherwise the
+    // first quiet tick sees "already closed" and never actually mutes it.
+    this.localGateOpen = this.localMicActive;
 
     this.localDest = ctx.createMediaStreamDestination();
     this.localAnalyser = ctx.createAnalyser();
@@ -582,7 +585,7 @@ class PolyglotAudioEngine {
 
       if (!this.localMicActive) {
         this.localMicActive = true;
-        this.localGateGain?.gain.setTargetAtTime(1.0, ctx.currentTime, 0.01);
+        this.localGateGain?.gain.setTargetAtTime(this.localGateOpen ? 1.0 : 0.0, ctx.currentTime, 0.01);
       }
 
       this.localAnalyser.getFloatTimeDomainData(data);
@@ -598,7 +601,9 @@ class PolyglotAudioEngine {
       const level = Math.min(1, rms * 8);
       const now = Date.now();
 
-      // Track speech activity for UI indicator without attenuating outgoing voice
+      // Speech activity drives both the UI indicator and the outgoing gate.
+      // Browser noise suppression is still the first line of defence; this
+      // removes the remaining room/keyboard floor in the pauses between words.
       if (rms >= this.noiseGateThreshold || peak >= this.noiseGateThreshold * 1.8) {
         this.gateHoldUntil = now + 420;
         this.lastSpeakingAt = now;
@@ -607,6 +612,11 @@ class PolyglotAudioEngine {
       const gateOpenNow = now < this.gateHoldUntil;
       if (gateOpenNow !== this.localGateOpen) {
         this.localGateOpen = gateOpenNow;
+        this.localGateGain?.gain.setTargetAtTime(
+          gateOpenNow ? 1.0 : 0.0,
+          ctx.currentTime,
+          gateOpenNow ? 0.008 : 0.09
+        );
       }
 
       const isSpeaking = gateOpenNow || (now - this.lastSpeakingAt < 350);
@@ -624,6 +634,10 @@ class PolyglotAudioEngine {
   }
 
   teardownLocalPipeline() {
+    if (this.localVadTimer) {
+      clearInterval(this.localVadTimer);
+      this.localVadTimer = null;
+    }
     try { this.relayTap?.port.postMessage({ enabled: false }); } catch {}
     try { this.relayTap?.disconnect(); } catch {}
     try { this.silentMonitorGain?.disconnect(); } catch {}
@@ -644,6 +658,8 @@ class PolyglotAudioEngine {
     this.localDest = null;
     this.localAnalyser = null;
     this.gatedLocalStream = null;
+    this.localGateOpen = false;
+    this.gateHoldUntil = 0;
   }
 
   setRelayTargetsCount(count) {
@@ -698,9 +714,13 @@ class PolyglotAudioEngine {
       this.destroyChain(this.selfMonitorChain);
     }
 
+    // Preview the same voice the other players will hear: take the tap after
+    // the VAD gate, not the raw microphone, so "Тест голосу" respects the same
+    // noise gate in both gibberish and atmospheric modes.
+    const monitoredStream = this.gatedLocalStream || this.rawLocalStream;
     const mode = this.resolveSelfMonitorMode();
     const preset = this.resolveSelfMonitorPreset();
-    this.selfMonitorChain = this.createProcessingChain(this.rawLocalStream, mode, preset);
+    this.selfMonitorChain = this.createProcessingChain(monitoredStream, mode, preset);
   }
 
   setSelfMonitorMode(mode) {
