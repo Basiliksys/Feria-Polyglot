@@ -2,7 +2,8 @@
   const ICE_CONFIG = {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' }
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun.cloudflare.com:3478' }
     ]
   };
 
@@ -201,6 +202,7 @@
 
   // -------------------- WEBSOCKET CONNECTION --------------------
   function connectAndJoin(joinPayload) {
+    audioEngine.ensureInitialized().catch(() => {});
     if (state.ws) {
       try { state.ws.close(); } catch {}
     }
@@ -337,6 +339,9 @@
 
       case 'AUDIO_RELAY_CHUNK': {
         const peerState = state.peers.get(msg.fromClientId);
+        if (peerState && !state.relayTargetIds.has(msg.fromClientId)) {
+          setPeerConnState(msg.fromClientId, 'relay');
+        }
         await audioEngine.playRelayedAudioChunk(msg.fromClientId, msg.pcmBase64, msg.sampleRate, peerState);
         break;
       }
@@ -566,13 +571,13 @@
     $('noiseGateSlider').value = String(clamped);
     $('noiseGateLabel').textContent = `${clamped}%`;
     $('micGateMarker').style.left = `${clamped}%`;
-    const threshold = clamped === 0 ? 0.0005 : 0.0005 + Math.pow(clamped / 100, 1.5) * 0.0245;
+    const threshold = clamped === 0 ? 0.0003 : 0.0003 + Math.pow(clamped / 100, 1.4) * 0.0147;
     audioEngine.setNoiseGateThreshold(threshold);
     try { localStorage.setItem(LS_KEYS.NOISE_GATE, String(clamped)); } catch {}
   }
 
   function initNoiseGateFromStorage() {
-    let saved = 25;
+    let saved = 15;
     try {
       const raw = localStorage.getItem(LS_KEYS.NOISE_GATE);
       if (raw !== null) saved = Number(raw);

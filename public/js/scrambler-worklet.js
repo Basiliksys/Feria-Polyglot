@@ -159,7 +159,7 @@ class PolyglotScramblerProcessor extends AudioWorkletProcessor {
     const releaseAlpha = 1 - Math.exp(-1 / (0.070 * sampleRate));
     const fastAttack = 1 - Math.exp(-1 / (0.003 * sampleRate));
     const fastRelease = 1 - Math.exp(-1 / (0.035 * sampleRate));
-    const holdLimit = Math.round(0.090 * sampleRate);
+    const holdLimit = Math.round(0.320 * sampleRate);
 
     for (let i = 0; i < outCh0.length; i++) {
       const dry = inCh0[i];
@@ -254,20 +254,23 @@ class PolyglotScramblerProcessor extends AudioWorkletProcessor {
       }
       this.subLp = this.subLp * 0.86 + this.subSign * this.env * 0.14;
 
-      if (subOctaveMix > 0.001 && this.gateGain > 0.01) {
+      const gateActive = scrambleAmount < 0.01 || this.gateGain > 0.01;
+      if (subOctaveMix > 0.001 && gateActive) {
         sig += this.subLp * subOctaveMix * 1.45;
       }
 
       // Ring modulation (metallic/otherworldly voice texture)
-      if (ringModHz > 1 && ringModMix > 0.001 && this.gateGain > 0.01) {
+      if (ringModHz > 1 && ringModMix > 0.001 && gateActive) {
         this.ringPhase += ringInc;
         if (this.ringPhase > Math.PI * 2) this.ringPhase -= Math.PI * 2;
         const mod = Math.sin(this.ringPhase);
         sig = sig * (1 - ringModMix) + sig * mod * ringModMix * 1.35;
       }
 
-      // Apply noise gate cleanly to output so pauses have zero hiss
-      sig *= this.gateGain;
+      // Apply noise gate cleanly only during gibberish synthesis so normal speech never gets chopped
+      if (scrambleAmount >= 0.01) {
+        sig *= this.gateGain;
+      }
 
       // Soft limiter to prevent digital clipping
       if (sig > 0.95) sig = 0.95 + Math.tanh(sig - 0.95) * 0.05;

@@ -17,7 +17,10 @@ class PolyglotAudioEngine {
     this.localSource = null;
     this.localHpFilter = null;
     this.localLpFilter = null;
+    this.localCompressor = null;
+    this.localMakeupGain = null;
     this.localGateGain = null;
+    this.silentMonitorGain = null;
     this.localDest = null;
     this.localAnalyser = null;
     this.localVadTimer = null;
@@ -27,6 +30,7 @@ class PolyglotAudioEngine {
     // Relay capture node
     this.relayProcessor = null;
     this.relayTargetsCount = 0;
+    this.relayHoldUntil = 0;
     this.onAudioRelayChunk = null;
 
     this.atmosphericEnabled = true;
@@ -35,7 +39,7 @@ class PolyglotAudioEngine {
     this.selfMonitorMode = 'gibberish'; // 'gibberish' | 'atmospheric'
     this.currentSelfPreset = null;
     this.currentSelfLanguageId = 'common';
-    this.noiseGateThreshold = 0.015;
+    this.noiseGateThreshold = 0.0012;
 
     this.onLocalSpeakingChange = null;
     this.lastSpeakingState = false;
@@ -324,6 +328,9 @@ class PolyglotAudioEngine {
   async playRelayedAudioChunk(clientId, pcmBase64, sampleRate, peerState) {
     if (peerState?.mutedByWhisper) return;
     const chain = await this.ensureRelayChain(clientId, peerState);
+    if (this.ctx?.state === 'suspended') {
+      try { await this.ctx.resume(); } catch {}
+    }
     if (chain.userMuted || chain.whisperMuted) return;
 
     const binary = atob(pcmBase64);
@@ -332,20 +339,26 @@ class PolyglotAudioEngine {
     const int16 = new Int16Array(bytes.buffer);
     if (int16.length === 0) return;
 
-    const audioBuf = this.ctx.createBuffer(1, int16.length, sampleRate || 16000);
+    const audioBuf = this.ctx.createBuffer(1, int16.length, sampleRate || 24000);
     const chData = audioBuf.getChannelData(0);
     for (let i = 0; i < int16.length; i++) {
       chData[i] = int16[i] / 32768;
     }
 
+    const now = this.ctx.currentTime;
+    const hasGap = chain.nextRelayTime < now || chain.nextRelayTime > now + 0.35;
+    if (hasGap) {
+      chain.nextRelayTime = now + 0.03;
+      const fadeLen = Math.min(24, Math.floor(chData.length / 2));
+      for (let i = 0; i < fadeLen; i++) {
+        chData[i] *= i / fadeLen;
+        chData[chData.length - 1 - i] *= i / fadeLen;
+      }
+    }
+
     const src = this.ctx.createBufferSource();
     src.buffer = audioBuf;
     src.connect(chain.inputNode);
-
-    const now = this.ctx.currentTime;
-    if (chain.nextRelayTime < now || chain.nextRelayTime > now + 0.3) {
-      chain.nextRelayTime = now + 0.025;
-    }
     src.start(chain.nextRelayTime);
     chain.nextRelayTime += audioBuf.duration;
   }
@@ -436,8 +449,20 @@ class PolyglotAudioEngine {
     this.localLpFilter.type = 'lowpass';
     this.localLpFilter.frequency.value = 12000;
 
+    this.localCompressor = ctx.createDynamicsCompressor();
+    this.localCompressor.threshold.value = -28;
+    this.localCompressor.knee.value = 18;
+    this.localCompressor.ratio.value = 3.5;
+    this.localCompressor.attack.value = 0.005;
+    this.localCompressor.release.value = 0.18;
+
+    this.localMakeupGain = ctx.createGain();
+    this.localMakeupGain.gain.value = 1.25;
+
+    const initialTrack = rawStream.getAudioTracks()[0];
+    this.localMicActive = !!(initialTrack && initialTrack.enabled);
     this.localGateGain = ctx.createGain();
-    this.localGateGain.gain.value = 0.12;
+    this.localGateGain.gain.value = this.localMicActive ? 1.0 : 0.0;
 
     this.localDest = ctx.createMediaStreamDestination();
     this.localAnalyser = ctx.createAnalyser();
@@ -445,26 +470,39 @@ class PolyglotAudioEngine {
 
     this.localSource.connect(this.localHpFilter);
     this.localHpFilter.connect(this.localLpFilter);
-    this.localLpFilter.connect(this.localAnalyser);
-    this.localLpFilter.connect(this.localGateGain);
+    this.localLpFilter.connect(this.localCompressor);
+    this.localCompressor.connect(this.localMakeupGain);
+    this.localMakeupGain.connect(this.localAnalyser);
+    this.localMakeupGain.connect(this.localGateGain);
     this.localGateGain.connect(this.localDest);
 
-    // Optional relay capture node (downsamples to 16kHz Int16 only when relayTargetsCount > 0 & gate open)
+    // Optional relay capture node retained on `this` so GC never collects it while active
     this.relayProcessor = ctx.createScriptProcessor(2048, 1, 1);
-    const silentMonitorGain = ctx.createGain();
-    silentMonitorGain.gain.value = 0;
+    this.silentMonitorGain = ctx.createGain();
+    this.silentMonitorGain.gain.value = 0;
     this.localGateGain.connect(this.relayProcessor);
-    this.relayProcessor.connect(silentMonitorGain);
-    silentMonitorGain.connect(ctx.destination);
+    this.relayProcessor.connect(this.silentMonitorGain);
+    this.silentMonitorGain.connect(ctx.destination);
 
     this.relayProcessor.onaudioprocess = (ev) => {
-      if (this.relayTargetsCount <= 0 || !this.localGateOpen || !this.onAudioRelayChunk) return;
+      if (this.relayTargetsCount <= 0 || !this.onAudioRelayChunk) return;
       const track = this.rawLocalStream?.getAudioTracks()[0];
       if (!track || !track.enabled) return;
 
       const input = ev.inputBuffer.getChannelData(0);
+      let peak = 0;
+      for (let i = 0; i < input.length; i++) {
+        const av = Math.abs(input[i]);
+        if (av > peak) peak = av;
+      }
+      const nowMs = Date.now();
+      if (peak > 0.0008) {
+        this.relayHoldUntil = nowMs + 800;
+      }
+      if (nowMs >= this.relayHoldUntil) return;
+
       const inRate = ctx.sampleRate;
-      const outRate = 16000;
+      const outRate = 24000;
       const ratio = inRate / outRate;
       const outLen = Math.floor(input.length / ratio);
       const int16 = new Int16Array(outLen);
@@ -494,12 +532,20 @@ class PolyglotAudioEngine {
       const muted = !track || !track.enabled;
       if (muted) {
         this.localGateOpen = false;
-        this.localGateGain?.gain.setTargetAtTime(0.0, ctx.currentTime, 0.02);
+        if (this.localMicActive) {
+          this.localMicActive = false;
+          this.localGateGain?.gain.setTargetAtTime(0.0, ctx.currentTime, 0.02);
+        }
         if (this.lastSpeakingState) {
           this.lastSpeakingState = false;
           this.onLocalSpeakingChange?.(false, 0);
         }
         return;
+      }
+
+      if (!this.localMicActive) {
+        this.localMicActive = true;
+        this.localGateGain?.gain.setTargetAtTime(1.0, ctx.currentTime, 0.01);
       }
 
       this.localAnalyser.getFloatTimeDomainData(data);
@@ -515,7 +561,7 @@ class PolyglotAudioEngine {
       const level = Math.min(1, rms * 8);
       const now = Date.now();
 
-      // Soft expander instead of hard walkie-talkie squelch
+      // Track speech activity for UI indicator without attenuating outgoing voice
       if (rms >= this.noiseGateThreshold || peak >= this.noiseGateThreshold * 1.8) {
         this.gateHoldUntil = now + 420;
         this.lastSpeakingAt = now;
@@ -524,7 +570,6 @@ class PolyglotAudioEngine {
       const gateOpenNow = now < this.gateHoldUntil;
       if (gateOpenNow !== this.localGateOpen) {
         this.localGateOpen = gateOpenNow;
-        this.localGateGain?.gain.setTargetAtTime(gateOpenNow ? 1.0 : 0.12, ctx.currentTime, gateOpenNow ? 0.005 : 0.18);
       }
 
       const isSpeaking = gateOpenNow || (now - this.lastSpeakingAt < 350);
@@ -543,14 +588,21 @@ class PolyglotAudioEngine {
 
   teardownLocalPipeline() {
     try { this.relayProcessor?.disconnect(); } catch {}
+    try { this.silentMonitorGain?.disconnect(); } catch {}
     try { this.localSource?.disconnect(); } catch {}
     try { this.localHpFilter?.disconnect(); } catch {}
     try { this.localLpFilter?.disconnect(); } catch {}
+    try { this.localCompressor?.disconnect(); } catch {}
+    try { this.localMakeupGain?.disconnect(); } catch {}
     try { this.localGateGain?.disconnect(); } catch {}
     this.relayProcessor = null;
+    this.silentMonitorGain = null;
+    this.relayHoldUntil = 0;
     this.localSource = null;
     this.localHpFilter = null;
     this.localLpFilter = null;
+    this.localCompressor = null;
+    this.localMakeupGain = null;
     this.localGateGain = null;
     this.localDest = null;
     this.localAnalyser = null;
@@ -562,7 +614,8 @@ class PolyglotAudioEngine {
   }
 
   setNoiseGateThreshold(threshold) {
-    this.noiseGateThreshold = Math.max(0.001, Math.min(0.15, Number(threshold) || 0.015));
+    const parsed = Number(threshold);
+    this.noiseGateThreshold = Math.max(0.0002, Math.min(0.15, Number.isFinite(parsed) ? parsed : 0.0012));
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     for (const chain of this.peerChains.values()) {
