@@ -352,17 +352,6 @@
       "forcedLanguage": null
     },
     {
-      "id": "vulkan",
-      "name": "Вулкан Гросміт",
-      "title": "Майстер Гільдії",
-      "icon": "🛠️",
-      "avatarColor": "#f59e0b",
-      "languages": ["common", "dwarvish", "niman_cipher", "draconic"],
-      "comprehendLanguages": false,
-      "tongues": false,
-      "forcedLanguage": null
-    },
-    {
       "id": "jagatai",
       "name": "Джагатай Кара-Буран",
       "title": "Воїн Ехо / Сотник «Чорна Буря»",
