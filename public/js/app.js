@@ -48,6 +48,7 @@
     peerConnTimers: new Map(), // clientId -> timeout id (unused legacy hook)
     pendingIceCandidates: new Map(), // clientId -> RTCIceCandidateInit[]
     relayTargetIds: new Set(),
+    directAudioPeers: new Set(), // peers whose WebRTC track is already attached
     relaySequence: 0,
     serverBuildId: null, // changes when a new deploy takes over
     joinPayload: null,
@@ -823,7 +824,9 @@
   }
 
   function shouldPlayRelay(peerId) {
-    return window.PeerSession.shouldPlayRelay(peerId, state.peers, state.transports);
+    return window.PeerSession.shouldPlayRelay(
+      peerId, state.peers, state.transports, state.directAudioPeers
+    );
   }
 
   function isFreshSignaling(msg) {
@@ -876,6 +879,7 @@
     state.peerConnTimers.clear();
     state.pendingIceCandidates.clear();
     state.relayTargetIds.clear();
+    state.directAudioPeers.clear();
     state.transports.clear();
     state.negotiators.clear();
     state.pcGenerations.clear();
@@ -969,6 +973,7 @@
       try {
         audioEngine.stopRelayPlayback(peerId);
         await audioEngine.attachPeerStream(peerId, stream, state.peers.get(peerId));
+        state.directAudioPeers.add(peerId);
       } catch (err) {
         console.warn('[webrtc] attach stream failed:', peerId, err.message);
         return;
@@ -1037,6 +1042,7 @@
     state.peerConnStates.delete(peerId);
     state.pendingIceCandidates.delete(peerId);
     state.relayTargetIds.delete(peerId);
+    state.directAudioPeers.delete(peerId);
     state.negotiators.delete(peerId);
     if (!options.keepTransport) state.transports.delete(peerId);
     state.pcGenerations.set(peerId, (state.pcGenerations.get(peerId) || 0) + 1);

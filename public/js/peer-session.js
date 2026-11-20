@@ -79,8 +79,11 @@
    * frames received after a direct connection is confirmed would duplicate the
    * WebRTC stream (audible echo/loop).
    */
-  function shouldPlayRelay(peerId, peers, transports) {
+  function shouldPlayRelay(peerId, peers, transports, directAttached) {
     if (!peers || !peers.has(peerId)) return false;
+    // ontrack can precede the "connected" state; once a remote WebRTC track is
+    // attached, replaying relay audio would replace it with a delayed copy.
+    if (directAttached && directAttached.has(peerId)) return false;
     const transport = transports && transports.get(peerId);
     return !transport || transport.state !== TRANSPORT_STATE.DIRECT;
   }

@@ -77,6 +77,12 @@ test('inbound relay audio stops once direct audio is confirmed', () => {
   assert.equal(shouldPlayRelay('a', peers, transports), true);
   transports.get('a').state = TRANSPORT_STATE.DIRECT;
   assert.equal(shouldPlayRelay('a', peers, transports), false, 'no duplicate audio after connect');
+
+  transports.get('a').state = TRANSPORT_STATE.CONNECTING;
+  assert.equal(shouldPlayRelay('a', peers, transports), true);
+  const attached = new Set(['a']);
+  assert.equal(shouldPlayRelay('a', peers, transports, attached), false,
+    'ontrack alone already provides direct audio');
 });
 
 test('speaking updates are throttled instead of sent on every VAD tick', () => {
