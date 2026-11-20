@@ -50,6 +50,7 @@
     relayTargetIds: new Set(),
     directAudioPeers: new Set(), // peers whose WebRTC track is already attached
     relaySequence: 0,
+    pendingIceRestart: new Set(), // peerIds waiting for a stable signaling state
     serverBuildId: null, // changes when a new deploy takes over
     joinPayload: null,
     reconnectAttempt: 0,
@@ -67,13 +68,20 @@
     hoveredLanguageId: null,
     replyPromptLang: null,
     replyPromptTimer: null,
+    replyPromptDismissed: new Map(), // clientId -> languageId whose prompt was dismissed
     whisperTarget: null, // { clientId, characterId, name }
     latestSnapshot: null,
     pendingBackupSnapshot: null,
     dmLastRevealedTarget: 'ALL',
     activeHandoutMsgId: null,
-    isBuilderPreviewing: false
+    isBuilderPreviewing: false,
+    builderPreviewPrevious: null, // self-monitor state before "Test voice"
+    languageSelectionPending: null // optimistic active-language choice awaiting server confirmation
   };
+
+  // Lets the audio engine re-check transport state after its own async work;
+  // otherwise a relay chunk in flight can land after ontrack installed WebRTC.
+  audioEngine.isRelayAllowed = (clientId) => shouldPlayRelay(clientId);
 
   function loadPeerPrefs() {
     try {
@@ -165,8 +173,13 @@
 
   function sanitizeGlyph(icon, id, fallback = '✦') {
     const str = String(icon || '').trim();
-    if (!str || /[\u{1F300}-\u{1FAFF}\u2600-\u27BF]/u.test(str)) {
-      return DEFAULT_GLYPHS[id] || fallback;
+    // Server validation bounds length, but live/imported values must never be
+    // able to inject markup when icons are interpolated into innerHTML.
+    if (!str || str.length > 8 || /[<>&"'`{}[\]\\]/u.test(str) ||
+        /[\u{1F300}-\u{1FAFF}\u2600-\u27BF]/u.test(str)) {
+      return Object.prototype.hasOwnProperty.call(DEFAULT_GLYPHS, id)
+        ? String(DEFAULT_GLYPHS[id])
+        : fallback;
     }
     return str;
   }
@@ -193,6 +206,14 @@
 
   function getLanguage(langId) {
     return state.languages.find((l) => l.id === langId) || null;
+  }
+
+  function clearWhisperUi() {
+    state.whisperTarget = null;
+    const banner = $('whisperActiveBanner');
+    if (banner) banner.classList.add('hidden');
+    const input = $('chatInput');
+    if (input) input.placeholder = 'Записати фразу обраною мовою або текст напису...';
   }
 
   // -------------------- LOBBY --------------------
@@ -225,7 +246,7 @@
         btn.className = 'lobby-char-card';
         btn.innerHTML = `
           <div class="char-avatar-badge" style="background:${char.avatarColor}22;border:1px solid ${char.avatarColor}">
-            ${char.icon}
+            ${escapeHtml(char.icon)}
           </div>
           <div>
             <div class="lobby-char-name">${escapeHtml(char.name)}</div>
@@ -393,6 +414,8 @@
         // A new clientId means every existing PC was negotiated under the old
         // identity; rebuild them from the authoritative snapshot below.
         resetPeerSessions();
+        // The server clears whisper state on JOIN but does not echo it back.
+        clearWhisperUi();
         state.reconnectAttempt = 0;
         setSessionStatus('online', 'З’єднано');
         const joinedPeers = msg.peers || [];
@@ -413,10 +436,12 @@
 
         initNoiseGateFromStorage();
 
-        // Initialize microphone first so new peer connections get the outgoing
-        // track; reconcile the peer list before rendering so cards are current.
-        await initLocalAudio();
+        // Install the authoritative peer list BEFORE awaiting microphone permission:
+        // existing peers may send WebRTC signaling while the browser prompt is open,
+        // and isFreshSignaling would otherwise drop it as "unknown sender".
+        // setLocalStream() replaces the outgoing track on every existing sender.
         applyPeerSnapshot(joinedPeers);
+        await initLocalAudio();
 
         renderIdentityHeader();
         renderLanguagePanel();
@@ -464,9 +489,7 @@
           $('whisperActiveBanner').classList.remove('hidden');
           $('chatInput').placeholder = `Телепатичний шепіт для ${state.whisperTarget.name}...`;
         } else {
-          state.whisperTarget = null;
-          $('whisperActiveBanner').classList.add('hidden');
-          $('chatInput').placeholder = 'Записати фразу обраною мовою або текст напису...';
+          clearWhisperUi();
         }
         renderPeersGrid();
         break;
@@ -488,6 +511,9 @@
 
       case 'SELF_LANGUAGE_UPDATED':
         state.activeLanguageId = msg.languageId;
+        state.replyPromptDismissed.clear();
+        clearReplyPrompt();
+        state.languageSelectionPending = null;
         renderLanguagePanel();
         renderPeersGrid();
         updateActiveLanguageVisuals();
@@ -526,6 +552,9 @@
           updatePeerSpeakingDom(peer);
           if (peer.isSpeaking) {
             checkReplyPromptForPeer(peer);
+          } else {
+            state.replyPromptDismissed.delete(msg.clientId);
+            if (state.replyPromptLang?.clientId === msg.clientId) clearReplyPrompt();
           }
         }
         break;
@@ -591,6 +620,16 @@
         break;
 
       case 'ERROR':
+        if (state.languageSelectionPending &&
+            msg.error === 'Ваш персонаж не може говорити цією мовою.') {
+          // The server rejected the optimistic choice; undo it so the user can
+          // retry (otherwise the early return would swallow every retry).
+          state.activeLanguageId = state.languageSelectionPending.previousId;
+          state.languageSelectionPending = null;
+          renderLanguagePanel();
+          renderPeersGrid();
+          updateActiveLanguageVisuals();
+        }
         showToast(msg.error);
         break;
     }
@@ -636,14 +675,19 @@
       audioEngine.onAudioRelayChunk = (pcmInt16, sampleRate) => {
         if (state.relayTargetIds.size === 0 || !state.clientId) return;
         try {
-          const frame = RelayProtocol.encodeRelayFrame({
-            senderId: state.clientId,
-            targetIds: [...state.relayTargetIds],
-            sampleRate,
-            sequence: state.relaySequence++,
-            pcm: pcmInt16
-          });
-          wsSendBinary(frame);
+          // One frame per batch of 8 targets, all carrying the same PCM chunk.
+          // Sending only one rotating batch per chunk would drop audio for every
+          // listener outside that batch in rooms larger than 8 peers.
+          for (const targetIds of relayTargetBatches()) {
+            const frame = RelayProtocol.encodeRelayFrame({
+              senderId: state.clientId,
+              targetIds,
+              sampleRate,
+              sequence: state.relaySequence++,
+              pcm: pcmInt16
+            });
+            wsSendBinary(frame);
+          }
         } catch (err) {
           console.warn('Dropped relay chunk:', err.message);
         }
@@ -730,9 +774,9 @@
     $('noiseGateLabel').textContent = `${clamped}%`;
     $('micGateMarker').style.left = `${clamped}%`;
     // The meter shows level = min(1, rms * 8). Put the marker at the same
-    // RMS value it points to, so 15% really means "close below 0.019 RMS"
-    // instead of the previous ~0.001 that left the gate permanently open.
-    const threshold = clamped === 0 ? 0.0003 : Math.min(0.15, clamped / 800);
+    // RMS value it points to: 15% sets the OPEN threshold to ~0.019 RMS; the
+    // adaptive close threshold sits below that. The worklet clamps at 0.001.
+    const threshold = Math.max(0.001, Math.min(0.15, clamped / 800));
     audioEngine.setNoiseGateThreshold(threshold);
     try { localStorage.setItem(LS_KEYS.NOISE_GATE, String(clamped)); } catch {}
   }
@@ -829,6 +873,21 @@
     if (action === 'use-relay') setPeerConnState(peerId, 'relay');
   }
 
+  /**
+   * Every relay target must receive every PCM chunk. A binary frame holds at
+   * most 8 ids, so larger rooms are split into several frames per chunk; peers
+   * already known to be on relay go into the earliest frames.
+   */
+  function relayTargetBatches() {
+    const ids = [...state.relayTargetIds];
+    if (!ids.length) return [];
+    const priority = ids.filter((id) => ['relay', 'reconnecting', 'failed']
+      .includes(state.peerConnStates.get(id)));
+    const prioritySet = new Set(priority);
+    const rest = ids.filter((id) => !prioritySet.has(id));
+    return window.RelayProtocol.chunkRelayTargets([...priority, ...rest]);
+  }
+
   function shouldPlayRelay(peerId) {
     return window.PeerSession.shouldPlayRelay(
       peerId, state.peers, state.transports, state.directAudioPeers
@@ -857,9 +916,15 @@
   function getNegotiator(peerId) {
     let negotiator = state.negotiators.get(peerId);
     if (!negotiator) {
+      const generation = state.pcGenerations.get(peerId);
+      const expectedPc = state.peerConnections.get(peerId);
       negotiator = new window.PeerSession.PerfectNegotiator({
         polite: state.clientId > peerId,
         send: (description) => {
+          // createOffer/createAnswer can finish after a reconnect replaced the PC.
+          // Never let a description from the old generation reach the new peer.
+          if (state.pcGenerations.get(peerId) !== generation ||
+              state.peerConnections.get(peerId) !== expectedPc) return;
           wsSend({
             type: description.type === 'offer' ? 'WEBRTC_OFFER' : 'WEBRTC_ANSWER',
             targetClientId: peerId,
@@ -886,6 +951,7 @@
     state.pendingIceCandidates.clear();
     state.relayTargetIds.clear();
     state.directAudioPeers.clear();
+    state.pendingIceRestart.clear();
     state.transports.clear();
     state.negotiators.clear();
     state.pcGenerations.clear();
@@ -901,16 +967,20 @@
       setupPeerConnection(peer.clientId).catch((err) => {
         console.error('[webrtc] setup failed:', peer.clientId, err.message);
       });
+      checkReplyPromptForPeer(peer);
     }
     for (const peer of diff.updated) {
       audioEngine.updatePeerLanguage(peer.clientId, peer);
+      checkReplyPromptForPeer(peer);
     }
   }
 
-  async function setupPeerConnection(peerId, forceInitiator = false) {
+  async function setupPeerConnection(peerId, forceInitiator = false, reuseTransport = false) {
     cleanupPeerConnection(peerId, { keepTransport: true });
     const transport = getTransport(peerId);
-    transport.reset(Date.now());
+    // A recreated PC for the same peer must keep its relay/backoff history;
+    // otherwise repeated ICE restarts restart the 12s probe window forever.
+    if (!reuseTransport) transport.reset(Date.now());
     setPeerConnState(peerId, 'connecting');
 
     const generation = (state.pcGenerations.get(peerId) || 0) + 1;
@@ -962,7 +1032,9 @@
     // answerer never auto-offers after receiving a remote offer.
     pc.onnegotiationneeded = () => {
       if (!isCurrent(pc)) return;
-      negotiator.onNegotiationNeeded(pc).catch((err) => {
+      negotiator.onNegotiationNeeded(pc).then((sent) => {
+        if (sent) state.pendingIceRestart.delete(peerId);
+      }).catch((err) => {
         console.warn('[webrtc] negotiation failed:', peerId, err.message);
       });
     };
@@ -976,15 +1048,29 @@
     pc.ontrack = async (event) => {
       if (!isCurrent(pc)) return;
       const stream = event.streams[0] || new MediaStream([event.track]);
+      // Mark direct audio synchronously: a relay chunk already inside
+      // playRelayedAudioChunk must not resume and overwrite this stream.
+      audioEngine.stopRelayPlayback(peerId);
+      state.directAudioPeers.add(peerId);
       try {
-        audioEngine.stopRelayPlayback(peerId);
-        await audioEngine.attachPeerStream(peerId, stream, state.peers.get(peerId));
-        state.directAudioPeers.add(peerId);
+        const attached = await audioEngine.attachPeerStream(
+          peerId, stream, state.peers.get(peerId), () => isCurrent(pc)
+        );
+        if (!attached) {
+          state.directAudioPeers.delete(peerId);
+          return;
+        }
       } catch (err) {
+        if (state.pcGenerations.get(peerId) === generation) state.directAudioPeers.delete(peerId);
         console.warn('[webrtc] attach stream failed:', peerId, err.message);
         return;
       }
-      if (!isCurrent(pc)) return;
+      if (!isCurrent(pc)) {
+        // A cleanup during the await already detached this stream. Do not let a
+        // stale continuation re-add the marker for a newer peer connection.
+        if (state.pcGenerations.get(peerId) === generation) state.directAudioPeers.delete(peerId);
+        return;
+      }
       const pref = getPeerAudioPref(state.peers.get(peerId));
       audioEngine.setPeerVolume(peerId, pref.volume);
       audioEngine.setPeerMuted(peerId, pref.muted);
@@ -1011,7 +1097,7 @@
   async function handleWebRtcOffer(fromPeerId, offer) {
     let pc = state.peerConnections.get(fromPeerId);
     if (!pc || pc.signalingState === 'closed') {
-      await setupPeerConnection(fromPeerId);
+      await setupPeerConnection(fromPeerId, false, true);
       pc = state.peerConnections.get(fromPeerId);
     }
     if (!pc) return;
@@ -1030,9 +1116,9 @@
   }
 
   async function handleWebRtcIce(fromPeerId, candidate) {
+    const pc = state.peerConnections.get(fromPeerId);
     const negotiator = getNegotiator(fromPeerId);
     if (!negotiator.shouldAcceptCandidate()) return;
-    const pc = state.peerConnections.get(fromPeerId);
     if (!pc || pc.signalingState === 'closed' || !pc.remoteDescription || !pc.remoteDescription.type) {
       const queued = state.pendingIceCandidates.get(fromPeerId) || [];
       queued.push(candidate);
@@ -1047,6 +1133,7 @@
     state.peerConnTimers.delete(peerId);
     state.peerConnStates.delete(peerId);
     state.pendingIceCandidates.delete(peerId);
+    state.pendingIceRestart.delete(peerId);
     state.relayTargetIds.delete(peerId);
     state.directAudioPeers.delete(peerId);
     state.negotiators.delete(peerId);
@@ -1071,15 +1158,20 @@
   async function restartIce(peerId) {
     const pc = state.peerConnections.get(peerId);
     if (pc && pc.signalingState !== 'closed') {
+      state.pendingIceRestart.add(peerId);
       try {
         pc.restartIce();
-        await getNegotiator(peerId).onNegotiationNeeded(pc);
+        const sent = await getNegotiator(peerId).onNegotiationNeeded(pc);
+        // If an in-flight offer suppressed this attempt, the negotiationneeded
+        // event (or a later tick) will retry once signaling is stable again.
+        if (sent) state.pendingIceRestart.delete(peerId);
         return;
       } catch (err) {
+        state.pendingIceRestart.delete(peerId);
         console.warn('[webrtc] ICE restart failed:', peerId, err.message);
       }
     }
-    await setupPeerConnection(peerId, true);
+    await setupPeerConnection(peerId, true, true);
   }
 
   async function reconnectPeer(peerId) {
@@ -1099,6 +1191,13 @@
     const now = Date.now();
     for (const [peerId, transport] of state.transports) {
       if (!state.peers.has(peerId)) continue;
+      const pendingPc = state.peerConnections.get(peerId);
+      if (state.pendingIceRestart.has(peerId) && pendingPc &&
+          pendingPc.signalingState === 'stable') {
+        getNegotiator(peerId).onNegotiationNeeded(pendingPc).then((sent) => {
+          if (sent) state.pendingIceRestart.delete(peerId);
+        }).catch(() => {});
+      }
       const action = transport.tick(now);
       if (action === 'use-relay') {
         setPeerConnState(peerId, 'relay');
@@ -1136,6 +1235,8 @@
 
   function selectActiveLanguage(languageId) {
     if (state.activeLanguageId === languageId) return;
+    const previousId = state.activeLanguageId;
+    state.languageSelectionPending = { languageId, previousId };
     wsSend({ type: 'ACTIVE_LANGUAGE_CHANGE', languageId });
     state.activeLanguageId = languageId;
     if (state.replyPromptLang && state.replyPromptLang.languageId === languageId) {
@@ -1218,7 +1319,7 @@
         btn.type = 'button';
         btn.className = `lang-btn ${state.activeLanguageId === lang.id ? 'active' : ''}`;
         btn.style.setProperty('--lang-color', lang.color);
-        btn.innerHTML = `<span class="lang-btn-icon">${lang.icon}</span><span class="lang-btn-name">${escapeHtml(lang.name)}</span>`;
+        btn.innerHTML = `<span class="lang-btn-icon">${escapeHtml(lang.icon)}</span><span class="lang-btn-name">${escapeHtml(lang.name)}</span>`;
 
         if (state.role === 'dm' && lang.id !== 'common') {
           const editSpan = document.createElement('span');
@@ -1271,26 +1372,37 @@
     });
   }
 
+  function clearReplyPrompt(dismissedClientId = null, dismissedLanguageId = null) {
+    clearTimeout(state.replyPromptTimer);
+    state.replyPromptTimer = null;
+    if (dismissedClientId) state.replyPromptDismissed.set(dismissedClientId, dismissedLanguageId);
+    state.replyPromptLang = null;
+    $('replyPromptBanner').classList.add('hidden');
+  }
+
   function checkReplyPromptForPeer(peer) {
-    if (!peer || peer.languageId === 'common' || !peer.understood || !peer.canReplyInLanguage) {
-      if (state.replyPromptLang && peer && state.replyPromptLang.clientId === peer.clientId) {
-        clearTimeout(state.replyPromptTimer);
-        state.replyPromptLang = null;
-        $('replyPromptBanner').classList.add('hidden');
-      }
+    if (!peer) return;
+    // A dismissal is sticky only for the language that was dismissed. If the
+    // peer switches to another language while still speaking, prompt again.
+    if (state.replyPromptDismissed.get(peer.clientId) === peer.languageId) return;
+    state.replyPromptDismissed.delete(peer.clientId);
+    if (peer.languageId === 'common' || !peer.understood || !peer.canReplyInLanguage) {
+      state.replyPromptDismissed.delete(peer.clientId);
+      if (state.replyPromptLang?.clientId === peer.clientId) clearReplyPrompt();
       return;
     }
-    if (state.activeLanguageId === peer.languageId) return;
+    if (state.activeLanguageId === peer.languageId) {
+      state.replyPromptDismissed.delete(peer.clientId);
+      clearReplyPrompt();
+      return;
+    }
 
     state.replyPromptLang = peer;
-    $('replyPromptText').innerHTML = `<strong>${escapeHtml(peer.displayName)}</strong> говорить мовою <strong>${peer.languageIcon} ${escapeHtml(peer.languageName)}</strong>`;
+    $('replyPromptText').innerHTML = `<strong>${escapeHtml(peer.displayName)}</strong> говорить мовою <strong>${escapeHtml(peer.languageIcon)} ${escapeHtml(peer.languageName)}</strong>`;
     $('replyPromptBanner').classList.remove('hidden');
 
     clearTimeout(state.replyPromptTimer);
-    state.replyPromptTimer = setTimeout(() => {
-      $('replyPromptBanner').classList.add('hidden');
-      state.replyPromptLang = null;
-    }, 10000);
+    state.replyPromptTimer = setTimeout(() => clearReplyPrompt(), 10000);
   }
 
   $('replyPromptAcceptBtn').addEventListener('click', () => {
@@ -1300,7 +1412,8 @@
   });
 
   $('replyPromptDismissBtn').addEventListener('click', () => {
-    $('replyPromptBanner').classList.add('hidden');
+    // Keep a dismissal sticky until the peer stops speaking or changes language.
+    clearReplyPrompt(state.replyPromptLang?.clientId || null, state.replyPromptLang?.languageId || null);
   });
 
   function renderPeersGrid() {
@@ -1322,7 +1435,7 @@
         </div>
       </div>
       <div class="peer-lang-status" style="border-left: 3px solid ${selfLang.color}">
-        <span>${selfLang.icon} ${escapeHtml(selfLang.name)}</span>
+        <span>${escapeHtml(selfLang.icon)} ${escapeHtml(selfLang.name)}</span>
       </div>
     `;
     grid.appendChild(selfCard);
@@ -1348,7 +1461,7 @@
            </div>`;
       } else if (peer.understood) {
         statusHtml = `<div class="peer-lang-status" style="border-left:3px solid ${peer.languageColor}">
-             <span>${peer.languageIcon} ${escapeHtml(peer.languageName)}${peer.isWhisperToMe ? ' (Шепіт вам)' : ''}</span>
+             <span>${escapeHtml(peer.languageIcon)} ${escapeHtml(peer.languageName)}${peer.isWhisperToMe ? ' (Шепіт вам)' : ''}</span>
            </div>`;
       } else {
         statusHtml = `<div class="peer-lang-status unknown">
@@ -1454,7 +1567,7 @@
         <div class="dm-char-header">
           <div class="peer-top">
             <div class="peer-avatar" style="background:${char.avatarColor}22;border:1px solid ${char.avatarColor};width:32px;height:32px;font-size:1rem">
-              ${char.icon}
+              ${escapeHtml(char.icon)}
             </div>
             <div>
               <div class="peer-name">${escapeHtml(char.name)}</div>
@@ -1716,15 +1829,27 @@
     syncBuilderLabels();
   }
 
-  async function closeLangBuilder() {
-    if (state.isBuilderPreviewing) {
-      state.isBuilderPreviewing = false;
-      $('lbTestVoiceBtn').classList.remove('btn-active');
+  async function restoreSelfMonitorAfterPreview() {
+    const previous = state.builderPreviewPrevious;
+    state.isBuilderPreviewing = false;
+    $('lbTestVoiceBtn').classList.remove('btn-active');
+    if (previous) {
+      audioEngine.setSelfMonitorMode(previous.mode);
+      await audioEngine.enableSelfMonitor(previous.enabled);
+      $('selfMonitorMode').value = previous.mode;
+      $('selfMonitorBtn').classList.toggle('btn-active', previous.enabled);
+      $('selfMonitorMode').classList.toggle('hidden', !previous.enabled);
+      state.builderPreviewPrevious = null;
+    } else {
       await audioEngine.enableSelfMonitor(false);
       $('selfMonitorBtn').classList.remove('btn-active');
       $('selfMonitorMode').classList.add('hidden');
-      audioEngine.updateSelfLanguagePreset(getLanguage(state.activeLanguageId));
     }
+    audioEngine.updateSelfLanguagePreset(getLanguage(state.activeLanguageId));
+  }
+
+  async function closeLangBuilder() {
+    if (state.isBuilderPreviewing) await restoreSelfMonitorAfterPreview();
     $('langBuilderModal').classList.add('hidden');
   }
 
@@ -1737,6 +1862,12 @@
     $('lbTestVoiceBtn').classList.toggle('btn-active', state.isBuilderPreviewing);
 
     if (state.isBuilderPreviewing) {
+      if (!state.builderPreviewPrevious) {
+        state.builderPreviewPrevious = {
+          enabled: audioEngine.selfMonitorEnabled,
+          mode: audioEngine.selfMonitorMode
+        };
+      }
       if (!state.micEnabled) {
         await initLocalAudio($('micSelect').value || null);
       }
@@ -1744,8 +1875,7 @@
       audioEngine.updateSelfLanguagePreset({ id: 'preview', dspPreset: readBuilderDspPreset() });
       await audioEngine.enableSelfMonitor(true);
     } else {
-      await audioEngine.enableSelfMonitor(false);
-      audioEngine.updateSelfLanguagePreset(getLanguage(state.activeLanguageId));
+      await restoreSelfMonitorAfterPreview();
     }
   });
 
@@ -1863,7 +1993,7 @@
       card.innerHTML = `
         <div class="chat-msg-head">
           <div class="chat-msg-sender">
-            <span>${msg.senderIcon}</span>
+            <span>${escapeHtml(msg.senderIcon)}</span>
             <span style="color:${msg.senderColor}">${escapeHtml(msg.senderName)}</span>
             <span class="sub-hint">${timeStr}</span>
           </div>

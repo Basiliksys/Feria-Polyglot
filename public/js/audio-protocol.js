@@ -23,6 +23,26 @@
     return typeof id === 'string' && RELAY_ID_RE.test(id);
   }
 
+  /**
+   * Splits relay targets into frames of at most MAX_RELAY_TARGETS ids. Every
+   * frame carries the same PCM chunk: rotating mutually exclusive subsets would
+   * make listeners in a room larger than 8 lose most of their audio.
+   */
+  function chunkRelayTargets(ids, size = MAX_RELAY_TARGETS) {
+    const requested = size === undefined || size === null ? MAX_RELAY_TARGETS : Number(size);
+    const limit = Number.isFinite(requested) ? Math.max(0, Math.floor(requested)) : MAX_RELAY_TARGETS;
+    if (limit === 0) return [];
+    const seen = new Set();
+    const list = (Array.isArray(ids) ? ids : []).filter((id) => {
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+    const batches = [];
+    for (let i = 0; i < list.length; i += limit) batches.push(list.slice(i, i + limit));
+    return batches;
+  }
+
   function asciiBytes(str) {
     const out = new Uint8Array(str.length);
     for (let i = 0; i < str.length; i++) out[i] = str.charCodeAt(i) & 0x7f;
@@ -182,7 +202,9 @@
       this.outputRate = Number(options.outputRate) || RELAY_TARGET_RATE;
       this.ratio = this.inputRate / this.outputRate;
       this.chunkSamples = Number(options.chunkSamples) || RELAY_CHUNK_SAMPLES;
-      this.gateThreshold = Number(options.gateThreshold) || 0.0008;
+      const gateThreshold = Number(options.gateThreshold);
+      // Explicit 0 means "always relay"; do not collapse it to the default.
+      this.gateThreshold = Number.isFinite(gateThreshold) ? Math.max(0, gateThreshold) : 0.0008;
       this.holdMs = Number(options.holdMs) || 800;
 
       this.carry = 0;
@@ -204,11 +226,11 @@
     /** Pushes one block of Float32 samples; returns completed Int16Array chunks. */
     push(input, nowMs) {
       const chunks = [];
-      let peak = 0;
+      let blockPeak = 0;
       for (let i = 0; i < input.length; i++) {
         const sample = input[i];
         const abs = sample < 0 ? -sample : sample;
-        if (abs > peak) peak = abs;
+        if (abs > blockPeak) blockPeak = abs;
 
         this.sum += sample;
         this.sumCount++;
@@ -216,7 +238,10 @@
 
         if (this.carry >= this.ratio) {
           this.carry -= this.ratio;
-          if (peak > this.gateThreshold) this.holdUntilMs = nowMs + this.holdMs;
+          // Only the samples feeding this output count. A click at the end of a
+          // large block must not reopen the gate for its earlier silence.
+          if (blockPeak >= this.gateThreshold) this.holdUntilMs = nowMs + this.holdMs;
+          blockPeak = 0;
           if (nowMs <= this.holdUntilMs) {
             const value = this.sum / Math.max(1, this.sumCount);
             this.pending[this.pendingCount++] = value < 0
@@ -245,6 +270,7 @@
     MAX_ID_BYTES,
     RELAY_ID_RE,
     isRelayId,
+    chunkRelayTargets,
     encodeRelayFrame,
     decodeRelayFrame,
     decodeBase64Pcm,

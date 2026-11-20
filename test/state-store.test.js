@@ -88,6 +88,7 @@ test('normalizeState clamps, filters and sanitizes hostile input', () => {
         text: 'a'.repeat(9000),
         languageId: 'ghost',
         revealMap: { ALL: 25, liora: 50, __proto__: 100, constructor: 100, bogus: 75 },
+        whisperTargetClientIds: ['liora', '__proto__', 'liora', 'constructor', 42],
         timestamp: 'bad',
         senderIcon: '👁️'
       }
@@ -112,6 +113,7 @@ test('normalizeState clamps, filters and sanitizes hostile input', () => {
   assert.equal(state.messages[0].text.length, 4000);
   assert.equal(state.messages[0].languageId, 'common');
   assert.deepEqual(Object.keys(state.messages[0].revealMap).sort(), ['ALL', 'liora']);
+  assert.deepEqual(state.messages[0].whisperTargetClientIds, ['liora']);
   assert.equal(Object.getPrototypeOf(state.messages[0].revealMap), null);
   assert.ok(Number.isFinite(state.messages[0].timestamp));
 });
@@ -179,6 +181,44 @@ test('CampaignStore coalesces rapid saves into one KV write', async () => {
   store.scheduleSave(() => state);
   await store.close();
   assert.equal(calls.filter((c) => c[0] === 'SET').length, 1);
+});
+
+test('CampaignStore clears a transient write error after a successful retry', async () => {
+  const kv = {
+    'feria:campaign-state:owner': JSON.stringify({ id: 'owner-1', at: Date.now() })
+  };
+  let offline = true;
+  const store = new CampaignStore({
+    dataPath: path.join(tempDir(), 'runtime.json'),
+    url: 'https://example.upstash.io',
+    token: 'token',
+    ownerId: 'owner-1',
+    fetchImpl: async (_url, options) => {
+      const command = JSON.parse(options.body);
+      if (offline && command[0] === 'SET') throw new Error('temporary outage');
+      const [name, key, value] = command;
+      if (name === 'GET') return { ok: true, json: async () => ({ result: kv[key] ?? null }) };
+      if (name === 'SET') {
+        kv[key] = value;
+        return { ok: true, json: async () => ({ result: 'OK' }) };
+      }
+      throw new Error(`Unexpected command ${name}`);
+    },
+    debounceMs: 0,
+    logger: { warn() {}, error() {} }
+  });
+
+  const state = normalizeState(null);
+  store.scheduleSave(() => state);
+  await store.flush();
+  assert.match(store.status().lastSaveError, /KV write failed/);
+  assert.equal(store.status().degraded, true);
+
+  offline = false;
+  store.scheduleSave(() => state);
+  await store.flush();
+  assert.equal(store.status().lastSaveError, null, 'health can self-heal without a restart');
+  assert.equal(store.status().degraded, false);
 });
 
 test('CampaignStore falls back to the local seed when KV is unavailable', async () => {

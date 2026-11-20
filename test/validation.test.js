@@ -46,6 +46,25 @@ test('validateWsMessage rejects malformed and oversized payloads', () => {
   }), /language/);
 });
 
+test('scriptStyle prototype keys and non-ASCII relay ids are rejected', () => {
+  for (const key of ['__proto__', 'constructor', 'toString']) {
+    assert.match(validateWsMessage({
+      type: 'DM_CREATE_LANGUAGE', language: { name: 'X', scriptStyle: key }
+    }), /scriptStyle/);
+  }
+  assert.equal(validateWsMessage({
+    type: 'DM_CREATE_LANGUAGE', language: { name: 'X', scriptStyle: 'runic' }
+  }), null);
+  assert.equal(validateWsMessage({
+    type: 'AUDIO_RELAY_CHUNK', pcmBase64: 'AAAA',
+    targetClientIds: ['abc-123'], sampleRate: 24000
+  }), null);
+  assert.match(validateWsMessage({
+    type: 'AUDIO_RELAY_CHUNK', pcmBase64: 'AAAA',
+    targetClientIds: ['абв'], sampleRate: 24000
+  }), /relay targets/, 'binary relay frames cannot carry non-ASCII ids');
+});
+
 test('RateLimiter enforces capacity', () => {
   const limiter = new RateLimiter({ capacity: 2, refillPerSec: 0 });
   assert.equal(limiter.consume('client'), true);
@@ -54,10 +73,11 @@ test('RateLimiter enforces capacity', () => {
   assert.equal(limiter.consume('other'), true);
 });
 
-test('RateLimiter refills over time', async () => {
-  const limiter = new RateLimiter({ capacity: 1, refillPerSec: 1000 });
+test('RateLimiter refills over time', () => {
+  let now = 1000;
+  const limiter = new RateLimiter({ capacity: 1, refillPerSec: 100, now: () => now });
   assert.equal(limiter.consume('client'), true);
   assert.equal(limiter.consume('client'), false);
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  now += 20; // 2 tokens' worth of refill, capped at capacity
   assert.equal(limiter.consume('client'), true);
 });

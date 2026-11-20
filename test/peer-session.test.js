@@ -10,6 +10,7 @@ const {
   shouldSendRelay,
   shouldPlayRelay,
   shouldSendSpeakingUpdate,
+  peerSignature,
   withEpoch,
   TransportStateMachine,
   PerfectNegotiator
@@ -52,11 +53,40 @@ test('reconcilePeers ignores unknown fields and treats null snapshots as empty',
   assert.deepEqual(reconcilePeers([a], null).removed, ['a']);
 });
 
+test('peerSignature tracks DSP/script changes but ignores object key order', () => {
+  const a = peer('a', {
+    scriptStyle: 'runic',
+    dspPreset: { pitchRatio: 0.9, grainSizeMs: 140 },
+    canReplyInLanguage: true
+  });
+  const reordered = peer('a', {
+    scriptStyle: 'runic',
+    dspPreset: { grainSizeMs: 140, pitchRatio: 0.9 },
+    canReplyInLanguage: true
+  });
+  assert.equal(peerSignature(a), peerSignature(reordered));
+  assert.notEqual(
+    peerSignature(a),
+    peerSignature(peer('a', { ...a, scriptStyle: 'elvish' })),
+    'scriptStyle changes must refresh the peer audio bus'
+  );
+  assert.notEqual(
+    peerSignature(a),
+    peerSignature(peer('a', { ...a, dspPreset: { pitchRatio: 1.2, grainSizeMs: 140 } }))
+  );
+  assert.notEqual(
+    peerSignature(a),
+    peerSignature(peer('a', { ...a, canReplyInLanguage: false }))
+  );
+});
+
 test('capIceQueue keeps only the newest candidates', () => {
   assert.deepEqual(capIceQueue([1, 2, 3, 4, 5], 3), [3, 4, 5]);
   assert.deepEqual(capIceQueue([1, 2], 5), [1, 2]);
   assert.deepEqual(capIceQueue(null, 5), []);
-  assert.deepEqual(capIceQueue([1, 2, 3], 0), [1, 2, 3]);
+  assert.deepEqual(capIceQueue([1, 2, 3], 0), [], 'an explicit zero means no buffering');
+  assert.equal(capIceQueue(Array.from({ length: 100 }, (_, i) => i)).length, 64,
+    'the default keeps the newest 64 candidates');
 });
 
 test('relay stays armed until a direct connection is confirmed', () => {

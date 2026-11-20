@@ -1,6 +1,7 @@
 'use strict';
 
 const { SCRIPT_ALPHABETS, FILTER_TYPES, CATEGORIES, ID_RE, COLOR_RE, REVEAL_PERCENTS } = require('./state-store');
+const { isRelayId } = require('./public/js/audio-protocol');
 
 const MESSAGE_TYPES = new Set([
   'LEAVE', 'JOIN', 'ACTIVE_LANGUAGE_CHANGE', 'SPEAKING_STATE', 'SET_WHISPER_TARGET',
@@ -119,7 +120,10 @@ function validateWsMessage(data) {
       if (language.id !== undefined && !isId(language.id)) return 'Invalid language id';
       if (language.color !== undefined && !isColor(language.color)) return 'Invalid color';
       if (language.icon !== undefined && (typeof language.icon !== 'string' || language.icon.length > 8)) return 'Invalid icon';
-      if (language.scriptStyle !== undefined && !SCRIPT_ALPHABETS[language.scriptStyle]) return 'Invalid scriptStyle';
+      if (language.scriptStyle !== undefined &&
+          !Object.prototype.hasOwnProperty.call(SCRIPT_ALPHABETS, language.scriptStyle)) {
+        return 'Invalid scriptStyle';
+      }
       if (language.category !== undefined && !CATEGORIES.has(language.category)) return 'Invalid category';
       if (language.dspPreset !== undefined && !isPlainObject(language.dspPreset)) return 'Invalid DSP preset';
       return null;
@@ -156,8 +160,9 @@ function validateWsMessage(data) {
       const pcm = data.pcmBase64;
       if (typeof pcm !== 'string' || pcm.length === 0 || pcm.length > MAX_PCM_BASE64 ||
           pcm.length % 4 !== 0 || !BASE64_RE.test(pcm)) return 'Invalid audio chunk';
+      // Legacy JSON relay is re-encoded into a binary frame whose IDs are ASCII.
       if (!Array.isArray(data.targetClientIds) || data.targetClientIds.length < 1 ||
-          data.targetClientIds.length > MAX_RELAY_TARGETS || !data.targetClientIds.every(isId)) {
+          data.targetClientIds.length > MAX_RELAY_TARGETS || !data.targetClientIds.every(isRelayId)) {
         return 'Invalid relay targets';
       }
       const rate = Number(data.sampleRate);
@@ -179,14 +184,15 @@ function validateWsMessage(data) {
 
 /** Simple per-key token bucket with a shared refill rate. */
 class RateLimiter {
-  constructor({ capacity, refillPerSec }) {
+  constructor({ capacity, refillPerSec, now = () => Date.now() }) {
     this.capacity = capacity;
     this.refillPerSec = refillPerSec;
+    this.now = now;
     this.buckets = new Map();
   }
 
   consume(key, cost = 1) {
-    const now = Date.now();
+    const now = this.now();
     let bucket = this.buckets.get(key);
     if (!bucket) {
       bucket = { tokens: this.capacity, last: now };

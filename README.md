@@ -39,12 +39,12 @@
 
 ## Деплой на Render (основний варіант)
 
-Найшвидший шлях — Blueprint `render.yaml` у корені репозиторію: **New → Blueprint**, виберіть репо, введіть три секрети (`FERIA_DM_PIN`, `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`) і застосуйте. Blueprint задає один web-інстанс, `npm ci` / `npm start`, healthcheck `/api/health`, `NODE_ENV=production` і відсутність persistent disk. **`FERIA_DM_PIN` обов'язковий у production** — без нього сервер не стартує (інакше працював би публічний PIN `1250` з seed-файлу). Якщо безкоштовні web-інстанси недоступні — замініть `plan: free` на `0.5c-512mb`.
+Найшвидший шлях — Blueprint `render.yaml` у корені репозиторію: **New → Blueprint**, виберіть репо, введіть три секрети (`FERIA_DM_PIN`, `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`) і застосуйте. Blueprint задає один web-інстанс, гілку `render-hardening`, `npm ci` / `npm test` / `npm start`, healthcheck `/api/health`, `NODE_ENV=production` і відсутність persistent disk. **`FERIA_DM_PIN` обов'язковий у production** — без нього сервер не стартує (інакше працював би публічний PIN `1250` з seed-файлу). Якщо безкоштовні web-інстанси недоступні — замініть `plan: free` на `0.5c-512mb`.
 
 ### Налаштування сервісу
 
 - **Runtime:** Node.js 22 (Blueprint фіксує `NODE_VERSION: "22"`); глобальний `fetch` доступний з Node 18.
-- **Build Command:** `npm ci`
+- **Build Command:** `npm ci && npm test` — тести є частиною build, бо `preDeployCommand` доступний лише на платних планах Render.
 - **Start Command:** `npm start`
 - **Instance Count:** **1**. Реєстр учасників (`clients`) і WebRTC-сигналінг зберігаються у пам'яті процесу; кілька інстансів бачитимуть різні списки гравців. Масштабування потребує окремого pub/sub (не входить у цей етап).
 - **Region:** `frankfurt` (Blueprint). Створюйте Upstash Redis у регіоні **Frankfurt / Central Europe (EU)**, щоб мінімізувати затримку записів стану.
@@ -76,8 +76,9 @@ Render без платної persistent disk перезаписує файлов
 | `UPSTASH_REDIS_REST_TOKEN` | так (для Render) | Токен REST-ендпоінту. Секрет, не потрапляє в логи. |
 | `STATE_KEY` | ні | Ключ Redis для стану партії. |
 | `STATE_DIR` / `STATE_PATH` | ні | Шлях локального кешу. У режимі Upstash за замовчуванням `data/runtime-state.json` (seed-файл у репозиторії не перезаписується); без Upstash — `data/campaign-state.json`. |
-| `TURN_URL` / `TURN_URLS` | ні | Comma-separated TURN-адреси для прямого WebRTC. Без значення використовується публічний OpenRelay TURN. |
-| `TURN_USERNAME` / `TURN_CREDENTIAL` | ні | Креденціали TURN. Для браузера вони все одно видимі в `/api/rtc-config`, тож рекомендується власний TURN із короткоживучими токенами. |
+| `TURN_URL` / `TURN_URLS` | ні | Comma-separated TURN-адреси для прямого WebRTC. Без значення використовується `staticauth.openrelay.metered.ca` (порти 80/443, UDP/TCP/TLS). |
+| `TURN_USERNAME` / `TURN_CREDENTIAL` | ні | Явні креденціали TURN. Для браузера вони все одно видимі в `/api/rtc-config`, тож рекомендується власний TURN із короткоживучими токенами. Якщо задати тільки `TURN_URL` без цих змінних, сервер не підставляє порожній auth — TURN має бути без авторизації. |
+| `TURN_SHARED_SECRET` | ні | Секрет coturn static-auth для дефолтного OpenRelay; сервер генерує username `expiry:feria` і HMAC-SHA1 credential на 6 годин. |
 | `STUN_URLS` | ні | Comma-separated STUN-адреси (за замовчуванням Google + Cloudflare). |
 
 ### Спостереження та безпека
@@ -102,7 +103,7 @@ Render без платної persistent disk перезаписує файлов
 - Логіка сесії/WebRTC винесена в чистий модуль `public/js/peer-session.js` (тестується в Node): звіряння списку гравців за знімком (`JOIN_SUCCESS` / `STATE_SYNC`), стан транспорту з backoff-повторними спробами ICE і **perfect negotiation** (GLARE-обробка, rollback, відповідь не створює власну пропозицію).
 - Свіжість сигналінгу визначається за серверним `fromClientId` (після реконнекту ID новий) і повним скиданням PC/ICE/negotiator на новому `JOIN_SUCCESS` — клієнтський `epoch` більше не порівнюється між гравцями. Асинхронні помилки signaling/медіа не залишаються unhandled.
 - Релей — не «липкий» стан: він залишається увімкненим для всіх станів, крім підтвердженого прямого зв'язку (`connected`), тому гравці за NAT не зависають на «Перепідключення...». Вхідні PCM-кадри одразу перемикають транспорт у `relay`, але **не скасовують активну спробу ICE**: без цього безперервна мова щоразу відкладала б backoff і гравець лишався б у ретрансляторі назавжди. Періодичні спроби ICE повертають прямий зв'язок. Зниклі гравці видаляються з UI/аудіо/PC-карт разом із таймерами та чергами ICE.
-- Клієнт бере ICE-конфіг з `GET /api/rtc-config`: окрім STUN там завжди є **TURN** (публічний OpenRelay або власний через env). Без TURN гравці за симетричним NAT взагалі не можуть вийти з ретранслятора — самого backoff ICE недостатньо. Конфіг завантажується до входу в кімнату, тому нові `RTCPeerConnection` одразу знають про TURN.
+- Клієнт бере ICE-конфіг з `GET /api/rtc-config`: окрім STUN там завжди є **TURN** (публічний OpenRelay з короткоживучими static-auth даними або власний через env). Старий хост `openrelay.metered.ca` тепер резолвиться в чорну діру, тому дефолт оновлено на `staticauth.openrelay.metered.ca`. Без TURN гравці за симетричним NAT взагалі не можуть вийти з ретранслятора — самого backoff ICE недостатньо. Конфіг завантажується до входу в кімнату, тому нові `RTCPeerConnection` одразу знають про TURN.
 - `SPEAKING_STATE` більше не шлемо кожні 20 мс: зміна стану відправляється одразу, а рівень — не частіше 10 раз/с і лише при зміні ≥0.05. Це прибрало постійне зростання `rejectedMessages` у health (ліміт speaking — 20/с).
 - Додано globals-індикатор стану WS у шапці «Голосової зали» (`online / connecting / syncing / reconnecting / offline`), нові стани точок з'єднання та ARIA-підписи кнопок гравців. Гучність/mute більше не застосовуються при кожному ререндері: префи зберігаються в рушії і виживають заміну ланцюга/реконект.
 - Усі обіцянки обробників WS та WebRTC мають `catch`; черга ICE обмежена (64 кандидати), застарілі PC-генерації ігнорують пізні колбеки.
@@ -111,7 +112,7 @@ Render без платної persistent disk перезаписує файлов
 
 ```bash
 npm ci
-npm test      # 65 тестів: deploy config, security hardening, WS/reconnect/WebRTC-сесія, audio worklet/engine/buses, relay protocol, rules, state-store, validation, Render-style integration
+npm test      # 82 тести: deploy config, security hardening, WS/reconnect/WebRTC-сесія, audio worklet/engine/buses, relay protocol, rules, state-store, validation, Render-style integration
 npm start
 ```
 
@@ -119,9 +120,9 @@ npm start
 
 ### Чек-лист викладу (Phase 4)
 
-1. `npm ci && npm test` локально — усі тести мають бути зеленими (зараз 65).
+1. `npm ci && npm test` локально — усі тести мають бути зеленими (зараз 82).
 2. Створіть Upstash Redis REST і тримайте URL/токен готовим; PIN не зберігайте в репо.
-3. Створіть сервіс із `render.yaml` (або вручну: Node 22, `npm ci`, `npm start`, `/api/health`, **1 інстанс**, без диска) і заповніть `sync: false` змінні в Dashboard.
+3. Створіть сервіс із `render.yaml` (або вручну: Node 22, `npm ci && npm test`, `npm start`, `/api/health`, **1 інстанс**, гілка `render-hardening`, без диска) і заповніть `sync: false` змінні в Dashboard. Після злиття в `main` або приберіть `branch:` з Blueprint, або змініть його на `main`, інакше нові коміти в `main` не деплоїтимуться.
 4. Після першого деплою відкрийте `https://<service>.onrender.com/api/health`: `status: ok`, `storageMode: upstash`, `clients: 0`, `lastSyncAt` не порожній.
 5. Увійдіть як GM і як гравець, перевірте голос, релейний fallback та індикатор стану з'єднання. Зробіть change в партії, дочекайтеся `pendingSaves: 0` у health, перезапустіть сервіс і переконайтеся, що стан повернувся з Upstash.
 6. Для кастомного домену додайте його в Render (TLS видається автоматично); WS працює через `wss://` на тому саму хості.

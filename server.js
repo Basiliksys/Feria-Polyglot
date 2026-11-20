@@ -29,6 +29,8 @@ const DM_PIN = process.env.FERIA_DM_PIN || null;
 const BUILD_ID = process.env.RENDER_GIT_COMMIT || process.env.FERIA_BUILD_ID || crypto.randomUUID();
 const INSTANCE_ID = crypto.randomUUID();
 const MAX_CONNECTIONS_PER_IP = 24;
+// Shortened only by local regression tests; production always gets 20 s.
+const JOIN_TIMEOUT_MS = Math.max(100, Number(process.env.FERIA_JOIN_TIMEOUT_MS) || 20000);
 let shuttingDown = false;
 
 const store = new CampaignStore({
@@ -136,7 +138,9 @@ function translateToRunes(text, scriptStyle = 'runic', revealPercent = 0, seed =
 function computeRunes(text, scriptStyle = 'runic', revealPercent = 0, seed = 1) {
   if (revealPercent >= 100) return text;
 
-  const alphabetStr = SCRIPT_ALPHABETS[scriptStyle] || SCRIPT_ALPHABETS.runic;
+  const alphabetStr = Object.prototype.hasOwnProperty.call(SCRIPT_ALPHABETS, scriptStyle)
+    ? SCRIPT_ALPHABETS[scriptStyle]
+    : SCRIPT_ALPHABETS.runic;
   const glyphs = Array.from(alphabetStr);
 
   // Split text preserving words and separators
@@ -264,9 +268,14 @@ function canSeeMessage(msg, recipient) {
   if (!msg.isWhisper) return true;
   if (recipient.role === 'dm') return true;
   if (recipient.id === msg.senderClientId) return true;
-  if (msg.senderCharacterId && recipient.characterId === msg.senderCharacterId) return true;
+  // Character ids are reusable. Granting access by senderCharacterId would let
+  // a later player joining the same character read the previous session's
+  // private whispers from history.
+  // Bind history access to the sessions that were online when the whisper was
+  // written. Character ids are reusable, so a later player taking the same
+  // character must not inherit the previous session's private conversation.
+  if (Array.isArray(msg.whisperTargetClientIds) && msg.whisperTargetClientIds.includes(recipient.id)) return true;
   if (msg.whisperTargetClientId && recipient.id === msg.whisperTargetClientId) return true;
-  if (msg.whisperTargetCharacterId && recipient.characterId === msg.whisperTargetCharacterId) return true;
   return false;
 }
 
@@ -508,14 +517,26 @@ const DEFAULT_STUN_URLS = [
   'stun:stun1.l.google.com:19302',
   'stun:stun.cloudflare.com:3478'
 ];
-// Public best-effort relay so direct audio works without extra setup. Operators
-// can replace it with a private TURN via TURN_URL / TURN_USERNAME /
-// TURN_CREDENTIAL (credentials are necessarily visible to browser clients).
+// The old openrelay.metered.ca host now resolves to black-hole addresses. The
+// current Open Relay endpoint uses coturn-style shared-secret auth, so generate
+// short-lived browser credentials instead of shipping a fixed public password.
+// Operators can still override everything with TURN_URL(S)/USERNAME/CREDENTIAL.
+const DEFAULT_TURN_HOST = 'staticauth.openrelay.metered.ca';
+const DEFAULT_TURN_SECRET = 'openrelayprojectsecret';
 const DEFAULT_TURN_URLS = [
-  'turn:openrelay.metered.ca:80',
-  'turn:openrelay.metered.ca:80?transport=tcp',
-  'turn:openrelay.metered.ca:443?transport=tcp'
+  `turn:${DEFAULT_TURN_HOST}:80`,
+  `turn:${DEFAULT_TURN_HOST}:80?transport=tcp`,
+  `turn:${DEFAULT_TURN_HOST}:443?transport=tcp`,
+  `turns:${DEFAULT_TURN_HOST}:443?transport=tcp`
 ];
+
+function openRelayCredentials() {
+  const secret = process.env.TURN_SHARED_SECRET || DEFAULT_TURN_SECRET;
+  const expiresAt = Math.floor(Date.now() / 1000) + 6 * 60 * 60;
+  const username = `${expiresAt}:feria`;
+  const credential = crypto.createHmac('sha1', secret).update(username).digest('base64');
+  return { username, credential };
+}
 
 function parseIceUrls(value, fallback) {
   const raw = typeof value === 'string' && value.trim() ? value : fallback;
@@ -528,17 +549,20 @@ function parseIceUrls(value, fallback) {
 
 function buildRtcConfig() {
   const stunUrls = parseIceUrls(process.env.STUN_URLS, DEFAULT_STUN_URLS.join(','));
-  const turnUrls = parseIceUrls(
-    process.env.TURN_URL || process.env.TURN_URLS,
-    DEFAULT_TURN_URLS.join(',')
-  );
+  const customTurn = process.env.TURN_URL || process.env.TURN_URLS;
+  const turnUrls = parseIceUrls(customTurn, DEFAULT_TURN_URLS.join(','));
   const iceServers = stunUrls.map((urls) => ({ urls }));
   if (turnUrls.length) {
-    iceServers.push({
-      urls: turnUrls,
-      username: String(process.env.TURN_USERNAME || 'openrelayproject').slice(0, 256),
-      credential: String(process.env.TURN_CREDENTIAL || 'openrelayproject').slice(0, 512)
-    });
+    // Default OpenRelay uses coturn static-auth and needs generated credentials.
+    // A custom TURN may be no-auth, so never advertise empty username/credential
+    // fields unless the operator actually provided them.
+    const auth = customTurn
+      ? {
+          ...(process.env.TURN_USERNAME ? { username: String(process.env.TURN_USERNAME).slice(0, 256) } : {}),
+          ...(process.env.TURN_CREDENTIAL ? { credential: String(process.env.TURN_CREDENTIAL).slice(0, 512) } : {})
+        }
+      : openRelayCredentials();
+    iceServers.push({ urls: turnUrls, ...auth });
   }
   return { iceServers };
 }
@@ -702,6 +726,49 @@ function disconnectClient(targetClient, closeWs = true) {
   }
 }
 
+/** Drops sessions/whisper targets that no longer exist after a DM state edit. */
+function pruneStaleSessions() {
+  const validCharIds = new Set(state.characters.map((c) => c.id));
+  for (const client of [...clients.values()]) {
+    if (client.joined && client.role === 'player' && client.characterId &&
+        !validCharIds.has(client.characterId)) {
+      disconnectClient(client, true);
+    }
+  }
+  const joinedIds = new Set([...clients.values()]
+    .filter((c) => c.joined).map((c) => c.id));
+  for (const client of clients.values()) {
+    if (!client.joined) continue;
+    const staleClient = client.whisperTargetClientId &&
+      !joinedIds.has(client.whisperTargetClientId);
+    const staleChar = client.whisperTargetCharacterId &&
+      !validCharIds.has(client.whisperTargetCharacterId);
+    if (!staleClient && !staleChar) continue;
+    client.whisperTargetClientId = null;
+    client.whisperTargetCharacterId = null;
+    sendJson(client.ws, {
+      type: 'SELF_WHISPER_UPDATED',
+      targetClientId: null,
+      targetCharacterId: null,
+      targetName: null
+    });
+    broadcastPeerLanguageUpdate(client);
+  }
+}
+
+/** Failed JOINs must not leave unjoined sockets occupying per-IP connection slots. */
+function armJoinWatchdog(client) {
+  if (client.joined || client.joinTimer) return;
+  client.joined = false;
+  client.joinTimer = setTimeout(() => {
+    if (!client.joined && !shuttingDown) {
+      try { client.ws.terminate(); } catch {}
+      disconnectClient(client, false);
+    }
+  }, JOIN_TIMEOUT_MS);
+  client.joinTimer.unref?.();
+}
+
 wss.on('connection', (ws, req) => {
   const ip = req.ip || req.socket.remoteAddress || 'unknown';
   let connectionsFromIp = 0;
@@ -730,13 +797,7 @@ wss.on('connection', (ws, req) => {
     relayProtocol: 1
   };
   clients.set(clientId, client);
-  client.joinTimer = setTimeout(() => {
-    if (!client.joined && !shuttingDown) {
-      try { ws.terminate(); } catch {}
-      disconnectClient(client, false);
-    }
-  }, 20000);
-  client.joinTimer.unref?.();
+  armJoinWatchdog(client);
 
   ws.on('error', (err) => {
     console.warn('[ws] connection error:', err.message);
@@ -834,6 +895,11 @@ const heartbeatTimer = setInterval(() => {
     } catch {}
   }
   for (const limiter of Object.values(rateLimits)) limiter.prune();
+  // Health must be able to recover after a transient KV/local write failure even
+  // if no player sends another mutation. Retries remain ownership-guarded.
+  if (!shuttingDown && store.status().lastSaveError) {
+    store.scheduleSave(() => buildFullStateSnapshot());
+  }
 }, 20000);
 heartbeatTimer.unref();
 
@@ -849,10 +915,9 @@ function handleMessage(client, data) {
       // LEAVE removes the record; a same-socket JOIN must restore it or the
       // client can mutate state while being invisible to every broadcast.
       clients.set(client.id, client);
-      if (client.joinTimer) {
-        clearTimeout(client.joinTimer);
-        client.joinTimer = null;
-      }
+      // Only a successful JOIN disarms the watchdog. Re-arm it after LEAVE,
+      // where disconnectClient() removed the original timer.
+      armJoinWatchdog(client);
       client.whisperTargetClientId = null;
       client.whisperTargetCharacterId = null;
       client.isSpeaking = false;
@@ -898,6 +963,10 @@ function handleMessage(client, data) {
       }
 
       client.joined = true;
+      if (client.joinTimer) {
+        clearTimeout(client.joinTimer);
+        client.joinTimer = null;
+      }
       const myChar = getClientCharacter(client);
 
       const peers = [];
@@ -960,7 +1029,7 @@ function handleMessage(client, data) {
       if (client.isSpeaking === wasSpeaking && now - client.lastSpeakingForwardAt < 100) return;
       client.lastSpeakingForwardAt = now;
       for (const other of clients.values()) {
-        if (other.joined && other.id !== client.id) {
+        if (other.joined && other.id !== client.id && isWhisperAllowed(client, other)) {
           sendJson(other.ws, {
             type: 'PEER_SPEAKING_UPDATE',
             clientId: client.id,
@@ -1023,6 +1092,16 @@ function handleMessage(client, data) {
 
       const wClientId = client.whisperTargetClientId || null;
       const wCharId = client.whisperTargetCharacterId || null;
+      // Snapshot the concrete sessions allowed to read this whisper. A character
+      // target is resolved to the players currently playing it, never to a
+      // future player who happens to reuse the same character id.
+      const wClientIds = new Set();
+      if (wClientId) wClientIds.add(wClientId);
+      if (wCharId) {
+        for (const peer of clients.values()) {
+          if (peer.joined && peer.characterId === wCharId) wClientIds.add(peer.id);
+        }
+      }
       const isWhisper = !!(wClientId || wCharId);
       let whisperTargetName = null;
       if (isWhisper) {
@@ -1049,6 +1128,7 @@ function handleMessage(client, data) {
         translatedBy: null,
         isWhisper,
         whisperTargetClientId: wClientId,
+        whisperTargetClientIds: [...wClientIds],
         whisperTargetCharacterId: wCharId,
         whisperTargetName
       };
@@ -1287,7 +1367,9 @@ function handleMessage(client, data) {
         existing.category = ['standard', 'exotic', 'feria'].includes(payload.category) ? payload.category : existing.category;
         existing.color = payload.color || existing.color;
         existing.icon = sanitizeGlyph(payload.icon, existing.id, existing.icon || '✦');
-        existing.scriptStyle = SCRIPT_ALPHABETS[payload.scriptStyle] ? payload.scriptStyle : existing.scriptStyle;
+        existing.scriptStyle = Object.prototype.hasOwnProperty.call(SCRIPT_ALPHABETS, payload.scriptStyle)
+          ? payload.scriptStyle
+          : existing.scriptStyle;
         existing.dspPreset = sanitizedPreset;
       } else {
         const slug = name
@@ -1301,7 +1383,9 @@ function handleMessage(client, data) {
           category: ['standard', 'exotic', 'feria'].includes(payload.category) ? payload.category : 'feria',
           color: payload.color || '#c084fc',
           icon: sanitizeGlyph(payload.icon, newId, '✦'),
-          scriptStyle: SCRIPT_ALPHABETS[payload.scriptStyle] ? payload.scriptStyle : 'ancient',
+          scriptStyle: Object.prototype.hasOwnProperty.call(SCRIPT_ALPHABETS, payload.scriptStyle)
+            ? payload.scriptStyle
+            : 'ancient',
           dspPreset: sanitizedPreset
         });
       }
@@ -1360,7 +1444,9 @@ function handleMessage(client, data) {
       if (!client.joined || client.role !== 'dm') return;
       const charId = data.characterId;
       state.characters = state.characters.filter((c) => c.id !== charId);
+      // Refresh indexes before pruning broadcasts peer projections.
       saveState();
+      pruneStaleSessions();
       broadcastStateSync({ includeMessages: false });
       break;
     }
@@ -1384,7 +1470,9 @@ function handleMessage(client, data) {
       messages.length = 0;
       for (const msg of normalized.messages) messages.push(msg);
       state.messages = messages;
+      // Refresh indexes before pruning broadcasts peer projections.
       saveState();
+      pruneStaleSessions();
       broadcastStateSync();
       for (const peer of clients.values()) {
         if (peer.joined) broadcastPeerLanguageUpdate(peer);
@@ -1444,7 +1532,9 @@ async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`[server] ${signal} received, closing connections...`);
-  const forceExit = setTimeout(() => process.exit(1), 8000);
+  // Worst case is two ownership GETs plus one SET at 6 s each; leave enough
+  // headroom so a slow Upstash cannot truncate the final state flush.
+  const forceExit = setTimeout(() => process.exit(1), 25000);
   forceExit.unref();
   clearInterval(heartbeatTimer);
   // Stop new work before the final flush, otherwise a frame arriving during

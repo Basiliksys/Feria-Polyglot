@@ -114,6 +114,18 @@ test('grain anchors are randomised instead of replaying a fixed loop', () => {
   assert.notEqual(grainA.anchor, grainB.anchor, 'two grains read different speech slices');
 });
 
+test('the built-in grain PRNG produces varied deterministic values', () => {
+  const { registered } = loadProcessors();
+  const Scrambler = registered['polyglot-scrambler-processor'];
+  const first = new Scrambler();
+  const second = new Scrambler();
+  const values = Array.from({ length: 64 }, () => first.nextRand());
+  assert.ok(values.every((v) => v >= 0 && v < 1));
+  assert.ok(new Set(values).size > 60, 'consecutive grains must not repeat a tiny cycle');
+  assert.deepEqual(Array.from({ length: 8 }, () => second.nextRand()), values.slice(0, 8),
+    'the seeded PRNG is reproducible across processors');
+});
+
 test('relay tap fails fast when RelayProtocol is missing', () => {
   let captured;
   const sandbox = {

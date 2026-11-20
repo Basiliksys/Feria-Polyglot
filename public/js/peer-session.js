@@ -21,13 +21,24 @@
   const RELEVANT_PEER_FIELDS = [
     'clientId', 'characterId', 'role', 'displayName', 'title', 'icon', 'avatarColor',
     'understood', 'languageId', 'languageName', 'languageIcon', 'languageColor',
-    'isSpeaking', 'speakingLevel', 'mutedByWhisper', 'isWhisperToMe'
+    'scriptStyle', 'dspPreset', 'canReplyInLanguage',
+    'mutedByWhisper', 'isWhisperToMe'
   ];
+
+  function stableValue(value) {
+    if (value == null) return '';
+    if (Array.isArray(value)) return `[${value.map(stableValue).join(',')}]`;
+    if (typeof value === 'object') {
+      return `{${Object.keys(value).sort()
+        .map((key) => `${key}:${stableValue(value[key])}`).join(',')}}`;
+    }
+    return String(value);
+  }
 
   function peerSignature(peer) {
     if (!peer) return '';
     return RELEVANT_PEER_FIELDS
-      .map((field) => `${field}=${peer[field] == null ? '' : String(peer[field])}`)
+      .map((field) => `${field}=${stableValue(peer[field])}`)
       .join('|');
   }
 
@@ -64,7 +75,8 @@
   }
 
   function capIceQueue(queue, limit) {
-    const max = Math.max(1, Number(limit) || 64);
+    const parsed = Number(limit);
+    const max = Number.isFinite(parsed) ? Math.max(0, parsed) : 64;
     if (!Array.isArray(queue)) return [];
     return queue.length > max ? queue.slice(queue.length - max) : queue.slice();
   }

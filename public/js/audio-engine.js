@@ -35,7 +35,9 @@ class PolyglotAudioEngine {
     this.relayTap = null;
     this.relayTargetsCount = 0;
     this.onAudioRelayChunk = null;
+    this.isRelayAllowed = () => true; // overridden by app.js with transport state
     this.relaySequence = 0;
+    this.localStreamGeneration = 0;
 
     this.atmosphericEnabled = true;
     this.dmHearAsGibberish = false;
@@ -241,7 +243,7 @@ class PolyglotAudioEngine {
     try { bus.chorusLfo.stop(); } catch {}
     for (const node of [
       bus.inputNode, bus.outputNode, bus.scrambler, bus.filter, bus.chorusDelay,
-      bus.chorusLfoGain, bus.chorusWetGain, bus.convolver, bus.reverbWetGain,
+      bus.chorusLfo, bus.chorusLfoGain, bus.chorusWetGain, bus.convolver, bus.reverbWetGain,
       bus.dryGain, bus.processedGain
     ]) {
       try { node.disconnect(); } catch {}
@@ -350,8 +352,12 @@ class PolyglotAudioEngine {
     return this.atmosphericEnabled ? 'ATMOSPHERIC' : 'CLEAN';
   }
 
-  async attachPeerStream(clientId, stream, peerState) {
+  async attachPeerStream(clientId, stream, peerState, isCurrent = () => true) {
+    // The caller may tear down the peer connection while initialization is
+    // pending. Never create a fresh chain for a stale ontrack callback.
+    if (!isCurrent()) return false;
     await this.ensureInitialized();
+    if (!isCurrent()) return false;
     const prevChain = this.peerChains.get(clientId);
     const storedPref = this.peerAudioPrefs.get(clientId);
     const prevVol = storedPref?.volume ?? prevChain?.userVolume ?? 1.0;
@@ -375,6 +381,7 @@ class PolyglotAudioEngine {
     chain.whisperMuted = !!peerState?.mutedByWhisper;
     this.syncChainOutputGain(chain);
     this.peerChains.set(clientId, chain);
+    return true;
   }
 
   async ensureRelayChain(clientId, peerState) {
@@ -396,11 +403,15 @@ class PolyglotAudioEngine {
 
   async playRelayedAudioChunk(clientId, frame, peerState) {
     if (peerState?.mutedByWhisper) return;
+    if (!this.isRelayAllowed(clientId)) return;
     const chain = await this.ensureRelayChain(clientId, peerState);
+    // A direct WebRTC track may have arrived while ensureInitialized/chain setup
+    // was pending. Recheck before creating any audio source.
+    if (!this.isRelayAllowed(clientId)) return;
     if (this.ctx?.state === 'suspended') {
       try { await this.ctx.resume(); } catch {}
     }
-    if (chain.userMuted || chain.whisperMuted) return;
+    if (!this.isRelayAllowed(clientId) || chain.userMuted || chain.whisperMuted) return;
 
     const int16 = frame.pcm;
     if (!int16 || int16.length === 0) return;
@@ -514,8 +525,11 @@ class PolyglotAudioEngine {
    * room noise / keyboard clicks are completely silenced when the user isn't speaking.
    */
   async setLocalStream(rawStream) {
-    this.rawLocalStream = rawStream;
+    const generation = ++this.localStreamGeneration;
     await this.ensureInitialized();
+    // A second microphone switch may have started while the audio context was
+    // loading; let the newest call win instead of building two pipelines.
+    if (generation !== this.localStreamGeneration) return this.gatedLocalStream;
 
     if (this.localVadTimer) {
       clearInterval(this.localVadTimer);
@@ -525,6 +539,7 @@ class PolyglotAudioEngine {
     this.teardownLocalPipeline();
 
     if (!rawStream) {
+      this.rawLocalStream = null;
       if (this.selfMonitorChain) {
         this.destroyChain(this.selfMonitorChain);
         this.selfMonitorChain = null;
@@ -532,6 +547,7 @@ class PolyglotAudioEngine {
       return null;
     }
 
+    this.rawLocalStream = rawStream;
     const ctx = this.ctx;
     this.localSource = ctx.createMediaStreamSource(rawStream);
 
@@ -684,6 +700,7 @@ class PolyglotAudioEngine {
     if (this.selfMonitorEnabled) {
       await this.enableSelfMonitor(true);
     }
+    if (generation !== this.localStreamGeneration) return this.gatedLocalStream;
 
     return this.gatedLocalStream;
   }
@@ -728,7 +745,8 @@ class PolyglotAudioEngine {
 
   setNoiseGateThreshold(threshold) {
     const parsed = Number(threshold);
-    this.noiseGateThreshold = Math.max(0.0002, Math.min(0.15, Number.isFinite(parsed) ? parsed : 0.0012));
+    // Match the AudioWorklet parameter's minValue so the UI slider is honest.
+    this.noiseGateThreshold = Math.max(0.001, Math.min(0.15, Number.isFinite(parsed) ? parsed : 0.0012));
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     this.buses.forEach((bus) => {

@@ -333,6 +333,74 @@ test('switching to direct audio cancels queued relay playback', async () => {
   assert.equal(source.stopped, 1, 'scheduled relay audio is stopped');
 });
 
+test('relay playback rechecks transport after async chain setup', async () => {
+  const engine = createEngine();
+  await engine.ensureInitialized();
+  let allowed = true;
+  engine.isRelayAllowed = () => allowed;
+  const original = engine.ensureRelayChain.bind(engine);
+  engine.ensureRelayChain = async (...args) => {
+    const chain = await original(...args);
+    // A direct WebRTC track arrived while the chain was being created.
+    allowed = false;
+    return chain;
+  };
+
+  await engine.playRelayedAudioChunk('p1', {
+    pcm: new Int16Array([0, 100, 0, -100]),
+    sampleRate: 24000
+  }, gibberishPeer('ancient'));
+
+  assert.equal(engine.ctx.lastSource, undefined, 'no relay source is scheduled after direct audio wins');
+  assert.equal(engine.peerChains.get('p1').relaySources.size, 0);
+});
+
+test('a stale peer attach cannot recreate a chain after cleanup', async () => {
+  const engine = createEngine();
+  await engine.ensureInitialized();
+  let current = true;
+  const resolvers = [];
+  engine.ensureInitialized = () => new Promise((resolve) => resolvers.push(resolve));
+
+  const attached = engine.attachPeerStream(
+    'p1',
+    { id: 'stale', getAudioTracks: () => [{ id: 'stale', enabled: true }] },
+    gibberishPeer('ancient'),
+    () => current
+  );
+  current = false; // cleanup ran while ensureInitialized was pending
+  resolvers[0]();
+
+  assert.equal(await attached, false);
+  assert.equal(engine.peerChains.has('p1'), false, 'no chain is built for a superseded peer connection');
+});
+
+test('the newest microphone switch wins when initialization overlaps', async () => {
+  const engine = createEngine();
+  await engine.ensureInitialized();
+  const realEnsureInitialized = engine.ensureInitialized.bind(engine);
+  const resolvers = [];
+  engine.ensureInitialized = () => new Promise((resolve) => resolvers.push(resolve));
+
+  const stream = (id) => ({
+    id,
+    getAudioTracks: () => [{ id, enabled: true }]
+  });
+  const first = engine.setLocalStream(stream('first'));
+  const second = engine.setLocalStream(stream('second'));
+  resolvers[0]();
+  resolvers[1]();
+  await Promise.all([first, second]);
+  engine.ensureInitialized = realEnsureInitialized;
+
+  try {
+    assert.equal(engine.rawLocalStream.id, 'second');
+    assert.equal(engine.localSource.stream.id, 'second');
+  } finally {
+    engine.teardownLocalPipeline();
+  }
+});
+
 test('short keyboard/mouse clicks do not open the noise gate', async () => {
   const engine = createEngine();
   await engine.ensureInitialized();

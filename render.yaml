@@ -8,8 +8,10 @@ services:
     runtime: node
     plan: free # use 0.5c-512mb (starter) if free web services are unavailable
     numInstances: 1
+    branch: render-hardening # never silently redeploy the old default branch
     region: frankfurt
-    buildCommand: npm ci
+    # preDeployCommand is paid-plan only on Render; keep the test gate in build.
+    buildCommand: npm ci && npm test # never deploy a red build
     startCommand: npm start
     healthCheckPath: /api/health
     # Free tier uses Render's default graceful-shutdown window;

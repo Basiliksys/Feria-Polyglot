@@ -7,6 +7,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
@@ -83,6 +84,19 @@ async function startServer(env, ipc = false) {
     });
   });
   return child;
+}
+
+async function startExpectedFailure(env) {
+  const child = spawn(process.execPath, ['server.js'], {
+    cwd: ROOT,
+    env: { ...process.env, ...env },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  let output = '';
+  child.stdout.on('data', (chunk) => { output += chunk; });
+  child.stderr.on('data', (chunk) => { output += chunk; });
+  const [code] = await once(child, 'exit');
+  return { code, output };
 }
 
 async function stopServer(child) {
@@ -215,6 +229,108 @@ test('rtc config uses operator-provided TURN credentials', { timeout: 30000 }, a
   assert.ok(!String(turn.urls).includes('openrelay.metered.ca'));
 });
 
+test('a custom TURN without credentials is advertised without empty auth fields', { timeout: 30000 }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feria-rtc-noauth-'));
+  const port = await freePort();
+  const server = await startServer(localEnv(port, dir, {
+    TURN_URL: 'turn:turn.example.com:3478?transport=tcp',
+    TURN_USERNAME: '', TURN_CREDENTIAL: ''
+  }));
+  t.after(async () => {
+    await stopServer(server);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const config = await fetch(`http://127.0.0.1:${port}/api/rtc-config`).then((r) => r.json());
+  const turn = config.iceServers.find((entry) => String(entry.urls).includes('turn.example.com'));
+  assert.ok(turn);
+  assert.equal(turn.username, undefined);
+  assert.equal(turn.credential, undefined);
+});
+
+test('default TURN uses short-lived static-auth credentials', { timeout: 30000 }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feria-rtc-staticauth-'));
+  const port = await freePort();
+  const server = await startServer(localEnv(port, dir, {
+    TURN_URL: '', TURN_URLS: '', TURN_USERNAME: '', TURN_CREDENTIAL: '',
+    TURN_SHARED_SECRET: 'unit-test-secret'
+  }));
+  t.after(async () => {
+    await stopServer(server);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const config = await fetch(`http://127.0.0.1:${port}/api/rtc-config`).then((r) => r.json());
+  const turn = config.iceServers.find((entry) => String(entry.urls).includes('turn:'));
+  assert.ok(turn);
+  assert.match(String(turn.urls), /staticauth\.openrelay\.metered\.ca/);
+  assert.doesNotMatch(String(turn.urls), /turn:openrelay\.metered\.ca/);
+  assert.match(turn.username, /^\d{10}:feria$/);
+  const expiry = Number(turn.username.split(':')[0]);
+  assert.ok(expiry > Date.now() / 1000 && expiry <= Date.now() / 1000 + 6 * 60 * 60 + 5);
+  assert.equal(
+    turn.credential,
+    crypto.createHmac('sha1', 'unit-test-secret').update(turn.username).digest('base64')
+  );
+});
+
+test('every API response forbids caching', { timeout: 30000 }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feria-api-cache-'));
+  const port = await freePort();
+  const server = await startServer(localEnv(port, dir));
+  t.after(async () => {
+    await stopServer(server);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const requests = [
+    fetch(`http://127.0.0.1:${port}/api/health`),
+    fetch(`http://127.0.0.1:${port}/api/lobby`),
+    fetch(`http://127.0.0.1:${port}/api/rtc-config`),
+    fetch(`http://127.0.0.1:${port}/api/export-state`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ pin: 'wrong' })
+    })
+  ];
+  for (const response of await Promise.all(requests)) {
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+  }
+});
+
+test('production refuses to start without an operator PIN', { timeout: 30000 }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feria-no-pin-'));
+  const port = await freePort();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const { code, output } = await startExpectedFailure(localEnv(port, dir, {
+    NODE_ENV: 'production',
+    FERIA_DM_PIN: '',
+    UPSTASH_REDIS_REST_URL: '',
+    UPSTASH_REDIS_REST_TOKEN: ''
+  }));
+  assert.equal(code, 1);
+  assert.match(output, /FERIA_DM_PIN must be set in production/);
+  assert.doesNotMatch(output, /listening/, 'a misconfigured server must never accept players');
+});
+
+test('failed JOINs release their connection slot after the watchdog', { timeout: 30000 }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feria-join-watchdog-'));
+  const port = await freePort();
+  const server = await startServer(localEnv(port, dir, { FERIA_JOIN_TIMEOUT_MS: '250' }));
+  t.after(async () => {
+    await stopServer(server);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const stuck = new WebSocket(`ws://127.0.0.1:${port}`);
+  await once(stuck, 'open');
+  stuck.send(JSON.stringify({ type: 'JOIN', role: 'dm', pin: 'definitely-wrong' }));
+  await once(stuck, 'close');
+
+  const health = await fetch(`http://127.0.0.1:${port}/api/health`).then((r) => r.json());
+  assert.equal(health.clients, 0, 'unjoined sockets are removed from the registry');
+});
+
 test('health returns 503 when Upstash cannot be reached', { timeout: 30000 }, async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feria-health-'));
   const port = await freePort();
@@ -299,6 +415,63 @@ test('WebRTC signaling honors whisper policy and lets the DM listen', { timeout:
   dm.ws.close();
   liora.ws.close();
   amenemhet.ws.close();
+});
+
+test('a later player with the sender character cannot read old whispers', { timeout: 30000 }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feria-whisper-history-'));
+  const port = await freePort();
+  const server = await startServer(localEnv(port, dir));
+  t.after(async () => {
+    await stopServer(server);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const first = await connectClient(port);
+  first.send({ type: 'JOIN', role: 'player', characterId: 'liora' });
+  const joined = await first.waitFor('JOIN_SUCCESS');
+  first.send({
+    type: 'SET_WHISPER_TARGET', targetClientId: null, targetCharacterId: 'amenemhet'
+  });
+  await first.waitFor('SELF_WHISPER_UPDATED');
+  first.send({ type: 'CHAT_MESSAGE', text: 'ТАЄМНИЦЯ-ІСТОРІЇ', languageId: 'common' });
+  await first.waitFor('CHAT_MESSAGE_NEW');
+  first.ws.close();
+
+  const successor = await connectClient(port);
+  successor.send({ type: 'JOIN', role: 'player', characterId: 'liora' });
+  const rejoined = await successor.waitFor('JOIN_SUCCESS');
+  assert.notEqual(joined.clientId, rejoined.clientId);
+  assert.ok(!rejoined.messages.some((m) => m.text === 'ТАЄМНИЦЯ-ІСТОРІЇ'),
+    'whispers are scoped to the original client, not a reusable character id');
+  successor.ws.close();
+});
+
+test('a later player with the target character cannot read old whispers', { timeout: 30000 }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feria-whisper-target-history-'));
+  const port = await freePort();
+  const server = await startServer(localEnv(port, dir));
+  t.after(async () => {
+    await stopServer(server);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const sender = await connectClient(port);
+  sender.send({ type: 'JOIN', role: 'player', characterId: 'liora' });
+  await sender.waitFor('JOIN_SUCCESS');
+  sender.send({
+    type: 'SET_WHISPER_TARGET', targetClientId: null, targetCharacterId: 'amenemhet'
+  });
+  await sender.waitFor('SELF_WHISPER_UPDATED');
+  sender.send({ type: 'CHAT_MESSAGE', text: 'ТАЄМНИЦЯ-ДЛЯ-АМЕНЕМХЕТА', languageId: 'common' });
+  await sender.waitFor('CHAT_MESSAGE_NEW');
+  sender.ws.close();
+
+  const target = await connectClient(port);
+  target.send({ type: 'JOIN', role: 'player', characterId: 'amenemhet' });
+  const joined = await target.waitFor('JOIN_SUCCESS');
+  assert.ok(!joined.messages.some((m) => m.text === 'ТАЄМНИЦЯ-ДЛЯ-АМЕНЕМХЕТА'),
+    'character-targeted whispers are bound to the sessions online at send time');
+  target.ws.close();
 });
 
 test('the graceful-shutdown path flushes a pending mutation before exit', { timeout: 60000 }, async (t) => {
