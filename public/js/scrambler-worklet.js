@@ -287,3 +287,53 @@ class PolyglotScramblerProcessor extends AudioWorkletProcessor {
 }
 
 registerProcessor('polyglot-scrambler-processor', PolyglotScramblerProcessor);
+
+/**
+ * PolyglotRelayTapProcessor — replaces the deprecated ScriptProcessorNode used
+ * for the WebSocket audio fallback. Encoding runs on the audio render thread,
+ * and completed 20 ms Int16 chunks are transferred (zero-copy) to the main
+ * thread. The node itself outputs silence; it is only tapped for capture.
+ */
+class PolyglotRelayTapProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    const protocol = globalThis.RelayProtocol;
+    if (!protocol) {
+      throw new Error('RelayProtocol must be loaded before polyglot-relay-tap-processor');
+    }
+    this.enabledFromPort = false;
+    this.outputRate = protocol.RELAY_TARGET_RATE;
+    this.encoder = new protocol.RelayPcmEncoder({
+      inputRate: sampleRate,
+      outputRate: this.outputRate,
+      chunkSamples: protocol.RELAY_CHUNK_SAMPLES,
+      gateThreshold: 0.0008,
+      holdMs: 800
+    });
+    this.port.onmessage = (event) => {
+      const data = event.data || {};
+      if (typeof data.enabled === 'boolean') this.enabledFromPort = data.enabled;
+      if (data.reset === true) this.encoder.reset();
+    };
+  }
+
+  process(inputs, outputs) {
+    const output = outputs[0];
+    if (output && output[0]) {
+      for (let ch = 0; ch < output.length; ch++) output[ch].fill(0);
+    }
+
+    const input = inputs[0] && inputs[0][0];
+    if (this.enabledFromPort && input) {
+      const chunks = this.encoder.push(input, currentTime * 1000);
+      for (const chunk of chunks) {
+        // Transfer the underlying buffer to the main thread (zero copy).
+        const buffer = chunk.buffer;
+        this.port.postMessage({ pcm: buffer, sampleRate: this.outputRate }, [buffer]);
+      }
+    }
+    return true;
+  }
+}
+
+registerProcessor('polyglot-relay-tap-processor', PolyglotRelayTapProcessor);

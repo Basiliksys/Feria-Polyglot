@@ -10,6 +10,8 @@ class PolyglotAudioEngine {
     this.reverbBuffer = null;
 
     this.peerChains = new Map(); // clientId -> chain object
+    this.peerAudioPrefs = new Map(); // clientId -> { volume, muted } (survives chain replacement)
+    this.buses = new DspBusRegistry((payload) => this.createDspBus(payload.mode, payload.preset));
     this.selfMonitorChain = null;
 
     this.rawLocalStream = null;
@@ -27,11 +29,11 @@ class PolyglotAudioEngine {
     this.localGateOpen = false;
     this.gateHoldUntil = 0;
 
-    // Relay capture node
-    this.relayProcessor = null;
+    // Relay capture node (AudioWorklet tap, replaces ScriptProcessorNode)
+    this.relayTap = null;
     this.relayTargetsCount = 0;
-    this.relayHoldUntil = 0;
     this.onAudioRelayChunk = null;
+    this.relaySequence = 0;
 
     this.atmosphericEnabled = true;
     this.dmHearAsGibberish = false;
@@ -69,6 +71,7 @@ class PolyglotAudioEngine {
       await this.ctx.resume();
     }
     if (!this.workletLoaded) {
+      await this.ctx.audioWorklet.addModule('/js/audio-protocol.js');
       await this.ctx.audioWorklet.addModule('/js/scrambler-worklet.js');
       this.workletLoaded = true;
     }
@@ -95,6 +98,160 @@ class PolyglotAudioEngine {
     return impulse;
   }
 
+  /**
+   * Builds the expensive shared DSP stage (scrambler + formant filter + chorus +
+   * reverb) once per mode/preset combination. Lightweight per-peer chains feed
+   * into `inputNode` through their own send gain.
+   */
+  createDspBus(mode, preset) {
+    const ctx = this.ctx;
+    const p = preset || this.demoGibberishPreset;
+
+    const inputNode = ctx.createGain();
+    const outputNode = ctx.createGain();
+    outputNode.connect(ctx.destination);
+
+    const scrambler = new AudioWorkletNode(ctx, 'polyglot-scrambler-processor');
+    scrambler.parameters.get('noiseGateThreshold').value = this.noiseGateThreshold;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'allpass';
+    filter.frequency.value = 1000;
+    filter.Q.value = 1.2;
+
+    const chorusDelay = ctx.createDelay(0.1);
+    chorusDelay.delayTime.value = 0.018;
+    const chorusLfo = ctx.createOscillator();
+    chorusLfo.type = 'sine';
+    chorusLfo.frequency.value = 0.65;
+    const chorusLfoGain = ctx.createGain();
+    chorusLfoGain.gain.value = 0.00045;
+    chorusLfo.connect(chorusLfoGain);
+    chorusLfoGain.connect(chorusDelay.delayTime);
+    chorusLfo.start();
+
+    const chorusWetGain = ctx.createGain();
+    chorusWetGain.gain.value = 0;
+
+    const convolver = ctx.createConvolver();
+    convolver.buffer = this.reverbBuffer;
+    const reverbWetGain = ctx.createGain();
+    reverbWetGain.gain.value = 0;
+
+    const dryGain = ctx.createGain();
+    dryGain.gain.value = 1;
+    const processedGain = ctx.createGain();
+    processedGain.gain.value = 0;
+
+    inputNode.connect(dryGain);
+    dryGain.connect(outputNode);
+    inputNode.connect(scrambler);
+    scrambler.connect(filter);
+    filter.connect(processedGain);
+    processedGain.connect(outputNode);
+    filter.connect(chorusDelay);
+    chorusDelay.connect(chorusWetGain);
+    chorusWetGain.connect(outputNode);
+    filter.connect(convolver);
+    convolver.connect(reverbWetGain);
+    reverbWetGain.connect(outputNode);
+
+    const self = this;
+    const bus = {
+      inputNode,
+      outputNode,
+      scrambler,
+      filter,
+      chorusDelay,
+      chorusLfo,
+      chorusLfoGain,
+      chorusWetGain,
+      convolver,
+      reverbWetGain,
+      dryGain,
+      processedGain,
+      mode,
+      preset: p,
+      destroy() { self.destroyDspBus(bus); }
+    };
+    this.applyBusState(bus, mode, p);
+    return bus;
+  }
+
+  applyBusState(bus, mode, preset) {
+    if (!bus || !this.ctx) return;
+    const now = this.ctx.currentTime;
+    const tau = 0.035;
+    const p = preset || this.demoGibberishPreset;
+    bus.mode = mode;
+    bus.preset = p;
+
+    const params = bus.scrambler.parameters;
+    params.get('noiseGateThreshold').setTargetAtTime(this.noiseGateThreshold, now, tau);
+
+    if (mode === 'CLEAN') {
+      bus.dryGain.gain.setTargetAtTime(1.0, now, tau);
+      bus.processedGain.gain.setTargetAtTime(0.0, now, tau);
+      bus.chorusWetGain.gain.setTargetAtTime(0.0, now, tau);
+      bus.reverbWetGain.gain.setTargetAtTime(0.0, now, tau);
+      params.get('scrambleAmount').setTargetAtTime(0.0, now, tau);
+      params.get('subOctaveMix').setTargetAtTime(0.0, now, tau);
+      params.get('ringModMix').setTargetAtTime(0.0, now, tau);
+      return;
+    }
+
+    if (mode === 'ATMOSPHERIC') {
+      bus.dryGain.gain.setTargetAtTime(1.0, now, tau);
+      bus.processedGain.gain.setTargetAtTime(0.0, now, tau);
+      params.get('scrambleAmount').setTargetAtTime(0.0, now, tau);
+      params.get('grainSizeMs').setTargetAtTime(p.grainSizeMs || 145, now, tau);
+      params.get('pitchRatio').setTargetAtTime(1.0, now, tau);
+      params.get('subOctaveMix').setTargetAtTime((p.subOctaveMix || 0) >= 0.3 ? 0.12 : 0.0, now, tau);
+      params.get('ringModHz').setTargetAtTime(p.ringModHz || 0, now, tau);
+      params.get('ringModMix').setTargetAtTime(0.0, now, tau);
+      bus.filter.type = p.filterType === 'bandpass' ? 'peaking' : (p.filterType || 'allpass');
+      bus.filter.frequency.setTargetAtTime(Math.max(120, Math.min(8000, p.filterFreq || 1200)), now, tau);
+      bus.filter.gain.setTargetAtTime(3.0, now, tau);
+      bus.chorusWetGain.gain.setTargetAtTime(Math.min(0.08, (p.chorusMix || 0) * 0.18), now, tau);
+      bus.reverbWetGain.gain.setTargetAtTime(Math.min(0.14, (p.reverbMix || 0) * 0.25), now, tau);
+      return;
+    }
+
+    // GIBBERISH mode: 0% dry, 100% vocoder-resynthesized fantasy speech.
+    bus.dryGain.gain.setTargetAtTime(0.0, now, tau);
+    bus.processedGain.gain.setTargetAtTime(1.15, now, tau);
+    params.get('scrambleAmount').setTargetAtTime(1.0, now, tau);
+    params.get('grainSizeMs').setTargetAtTime(p.grainSizeMs || 145, now, tau);
+    params.get('pitchRatio').setTargetAtTime(p.pitchRatio || 1.0, now, tau);
+    params.get('subOctaveMix').setTargetAtTime(p.subOctaveMix || 0, now, tau);
+    params.get('ringModHz').setTargetAtTime(p.ringModHz || 0, now, tau);
+    params.get('ringModMix').setTargetAtTime(p.ringModMix || 0, now, tau);
+    const shiftedFreq = Math.max(140, Math.min(7200, (p.filterFreq || 1200) + (p.formantShiftHz || 0)));
+    bus.filter.type = p.filterType || 'bandpass';
+    bus.filter.frequency.setTargetAtTime(shiftedFreq, now, tau);
+    bus.filter.Q.setTargetAtTime(p.filterType === 'bandpass' ? 1.15 : 0.9, now, tau);
+    bus.filter.gain.setTargetAtTime(6.0, now, tau);
+    bus.chorusWetGain.gain.setTargetAtTime(p.chorusMix || 0, now, tau);
+    bus.reverbWetGain.gain.setTargetAtTime((p.reverbMix || 0) * 0.85, now, tau);
+  }
+
+  destroyDspBus(bus) {
+    try { bus.chorusLfo.stop(); } catch {}
+    for (const node of [
+      bus.inputNode, bus.outputNode, bus.scrambler, bus.filter, bus.chorusDelay,
+      bus.chorusLfoGain, bus.chorusWetGain, bus.convolver, bus.reverbWetGain,
+      bus.dryGain, bus.processedGain
+    ]) {
+      try { node.disconnect(); } catch {}
+    }
+  }
+
+  /**
+   * Lightweight per-peer chain: source -> input cleanup -> send gain -> shared bus.
+   * The expensive scrambler/filter/chorus/reverb stage lives once in a DspBus,
+   * shared by every peer with the same mode/preset. Per-peer volume and mute are
+   * applied on `sendGain` before the signal is summed into the bus.
+   */
   createProcessingChain(stream, initialMode = 'CLEAN', initialPreset = null) {
     const ctx = this.ctx;
     const inputNode = ctx.createGain();
@@ -115,86 +272,25 @@ class PolyglotAudioEngine {
     lpFilter.type = 'lowpass';
     lpFilter.frequency.value = 12000;
 
+    // Per-peer send gain carries user volume / mute into the shared DSP bus.
+    const sendGain = ctx.createGain();
+    sendGain.gain.value = 1.0;
+
     inputNode.connect(hpFilter);
     hpFilter.connect(lpFilter);
-
-    // Granular Vocoder + Noise Gate AudioWorklet
-    const scrambler = new AudioWorkletNode(ctx, 'polyglot-scrambler-processor');
-    scrambler.parameters.get('noiseGateThreshold').value = this.noiseGateThreshold;
-
-    // Formant / flavor filter
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'allpass';
-    filter.frequency.value = 1000;
-    filter.Q.value = 1.2;
-
-    // Gentle LFO-modulated chorus (sub-millisecond sweep to avoid pitch wobble)
-    const chorusDelay = ctx.createDelay(0.1);
-    chorusDelay.delayTime.value = 0.018;
-    const chorusLfo = ctx.createOscillator();
-    chorusLfo.type = 'sine';
-    chorusLfo.frequency.value = 0.65;
-    const chorusLfoGain = ctx.createGain();
-    chorusLfoGain.gain.value = 0.00045;
-    chorusLfo.connect(chorusLfoGain);
-    chorusLfoGain.connect(chorusDelay.delayTime);
-    chorusLfo.start();
-
-    const chorusWetGain = ctx.createGain();
-    chorusWetGain.gain.value = 0;
-
-    // Smoothed cavern / cathedral reverb
-    const convolver = ctx.createConvolver();
-    convolver.buffer = this.reverbBuffer;
-    const reverbWetGain = ctx.createGain();
-    reverbWetGain.gain.value = 0;
-
-    // Clean bypass vs processed scrambler path
-    const dryGain = ctx.createGain();
-    dryGain.gain.value = 1;
-    const processedGain = ctx.createGain();
-    processedGain.gain.value = 0;
-
-    // Master output gain for this peer
-    const masterGain = ctx.createGain();
-    masterGain.gain.value = 1.0;
-
-    lpFilter.connect(dryGain);
-    dryGain.connect(masterGain);
-
-    lpFilter.connect(scrambler);
-    scrambler.connect(filter);
-    filter.connect(processedGain);
-    processedGain.connect(masterGain);
-
-    filter.connect(chorusDelay);
-    chorusDelay.connect(chorusWetGain);
-    chorusWetGain.connect(masterGain);
-
-    filter.connect(convolver);
-    convolver.connect(reverbWetGain);
-    reverbWetGain.connect(masterGain);
-
-    masterGain.connect(ctx.destination);
+    lpFilter.connect(sendGain);
 
     const chain = {
       source,
       inputNode,
       hpFilter,
       lpFilter,
-      scrambler,
-      filter,
-      chorusDelay,
-      chorusLfo,
-      chorusWetGain,
-      convolver,
-      reverbWetGain,
-      dryGain,
-      processedGain,
-      masterGain,
+      sendGain,
       audioEl: null,
       mode: initialMode,
       preset: initialPreset,
+      busKey: null,
+      bus: null,
       userVolume: 1.0,
       userMuted: false,
       whisperMuted: false,
@@ -208,73 +304,37 @@ class PolyglotAudioEngine {
   syncChainOutputGain(chain) {
     if (!chain || !this.ctx) return;
     const effective = (chain.userMuted || chain.whisperMuted) ? 0 : chain.userVolume;
-    chain.masterGain.gain.setTargetAtTime(effective, this.ctx.currentTime, 0.02);
+    chain.sendGain.gain.setTargetAtTime(effective, this.ctx.currentTime, 0.02);
   }
 
+  /**
+   * Moves a peer chain onto the shared bus for the requested mode/preset. DSP
+   * parameters are owned by the bus (set once when it is created), so switching
+   * a peer only rewires one gain node instead of rebuilding the whole chain.
+   */
   applyChainState(chain, mode, preset) {
     if (!chain || !this.ctx) return;
-    const now = this.ctx.currentTime;
-    const tau = 0.035;
-    const p = preset || this.demoGibberishPreset;
-
+    const effectivePreset = preset || this.demoGibberishPreset;
     chain.mode = mode;
-    chain.preset = p;
+    chain.preset = effectivePreset;
+
+    const key = DspBusRegistry.keyFor(mode, effectivePreset);
+    if (key !== chain.busKey) {
+      this.releaseChainBus(chain);
+      const acquired = this.buses.acquire(key, { key, mode, preset: effectivePreset });
+      chain.bus = acquired.bus;
+      chain.busKey = key;
+      try { chain.sendGain.connect(chain.bus.inputNode); } catch {}
+    }
     this.syncChainOutputGain(chain);
+  }
 
-    const params = chain.scrambler.parameters;
-    params.get('noiseGateThreshold').setTargetAtTime(this.noiseGateThreshold, now, tau);
-
-    if (mode === 'CLEAN') {
-      chain.dryGain.gain.setTargetAtTime(1.0, now, tau);
-      chain.processedGain.gain.setTargetAtTime(0.0, now, tau);
-      chain.chorusWetGain.gain.setTargetAtTime(0.0, now, tau);
-      chain.reverbWetGain.gain.setTargetAtTime(0.0, now, tau);
-      params.get('scrambleAmount').setTargetAtTime(0.0, now, tau);
-      params.get('subOctaveMix').setTargetAtTime(0.0, now, tau);
-      params.get('ringModMix').setTargetAtTime(0.0, now, tau);
-      return;
-    }
-
-    if (mode === 'ATMOSPHERIC') {
-      // Pure direct voice with zero AudioWorklet comb filtering + subtle room ambience
-      chain.dryGain.gain.setTargetAtTime(1.0, now, tau);
-      chain.processedGain.gain.setTargetAtTime(0.0, now, tau);
-
-      params.get('scrambleAmount').setTargetAtTime(0.0, now, tau);
-      params.get('grainSizeMs').setTargetAtTime(p.grainSizeMs || 145, now, tau);
-      params.get('pitchRatio').setTargetAtTime(1.0, now, tau);
-      params.get('subOctaveMix').setTargetAtTime((p.subOctaveMix || 0) >= 0.3 ? 0.12 : 0.0, now, tau);
-      params.get('ringModHz').setTargetAtTime(p.ringModHz || 0, now, tau);
-      params.get('ringModMix').setTargetAtTime(0.0, now, tau);
-
-      chain.filter.type = p.filterType === 'bandpass' ? 'peaking' : (p.filterType || 'allpass');
-      chain.filter.frequency.setTargetAtTime(Math.max(120, Math.min(8000, p.filterFreq || 1200)), now, tau);
-      chain.filter.gain.setTargetAtTime(3.0, now, tau);
-
-      chain.chorusWetGain.gain.setTargetAtTime(Math.min(0.08, (p.chorusMix || 0) * 0.18), now, tau);
-      chain.reverbWetGain.gain.setTargetAtTime(Math.min(0.14, (p.reverbMix || 0) * 0.25), now, tau);
-      return;
-    }
-
-    // GIBBERISH mode: 0% dry, 100% vocoder-resynthesized fantasy speech
-    chain.dryGain.gain.setTargetAtTime(0.0, now, tau);
-    chain.processedGain.gain.setTargetAtTime(1.15, now, tau);
-
-    params.get('scrambleAmount').setTargetAtTime(1.0, now, tau);
-    params.get('grainSizeMs').setTargetAtTime(p.grainSizeMs || 145, now, tau);
-    params.get('pitchRatio').setTargetAtTime(p.pitchRatio || 1.0, now, tau);
-    params.get('subOctaveMix').setTargetAtTime(p.subOctaveMix || 0, now, tau);
-    params.get('ringModHz').setTargetAtTime(p.ringModHz || 0, now, tau);
-    params.get('ringModMix').setTargetAtTime(p.ringModMix || 0, now, tau);
-
-    const shiftedFreq = Math.max(140, Math.min(7200, (p.filterFreq || 1200) + (p.formantShiftHz || 0)));
-    chain.filter.type = p.filterType || 'bandpass';
-    chain.filter.frequency.setTargetAtTime(shiftedFreq, now, tau);
-    chain.filter.Q.setTargetAtTime(p.filterType === 'bandpass' ? 1.15 : 0.9, now, tau);
-    chain.filter.gain.setTargetAtTime(6.0, now, tau);
-
-    chain.chorusWetGain.gain.setTargetAtTime(p.chorusMix || 0, now, tau);
-    chain.reverbWetGain.gain.setTargetAtTime((p.reverbMix || 0) * 0.85, now, tau);
+  releaseChainBus(chain) {
+    if (!chain || !chain.busKey) return;
+    try { chain.sendGain.disconnect(chain.bus.inputNode); } catch {}
+    this.buses.release(chain.busKey);
+    chain.bus = null;
+    chain.busKey = null;
   }
 
   resolveModeForPeer(peerState) {
@@ -288,8 +348,9 @@ class PolyglotAudioEngine {
   async attachPeerStream(clientId, stream, peerState) {
     await this.ensureInitialized();
     const prevChain = this.peerChains.get(clientId);
-    const prevVol = prevChain?.userVolume ?? 1.0;
-    const prevMuted = prevChain?.userMuted ?? false;
+    const storedPref = this.peerAudioPrefs.get(clientId);
+    const prevVol = storedPref?.volume ?? prevChain?.userVolume ?? 1.0;
+    const prevMuted = storedPref?.muted ?? prevChain?.userMuted ?? false;
 
     this.detachPeerStream(clientId);
 
@@ -319,13 +380,16 @@ class PolyglotAudioEngine {
       chain = this.createProcessingChain(null, mode, peerState?.dspPreset || null);
       chain.peerState = peerState;
       chain.whisperMuted = !!peerState?.mutedByWhisper;
+      const storedPref = this.peerAudioPrefs.get(clientId);
+      chain.userVolume = storedPref?.volume ?? 1.0;
+      chain.userMuted = storedPref?.muted ?? false;
       this.syncChainOutputGain(chain);
       this.peerChains.set(clientId, chain);
     }
     return chain;
   }
 
-  async playRelayedAudioChunk(clientId, pcmBase64, sampleRate, peerState) {
+  async playRelayedAudioChunk(clientId, frame, peerState) {
     if (peerState?.mutedByWhisper) return;
     const chain = await this.ensureRelayChain(clientId, peerState);
     if (this.ctx?.state === 'suspended') {
@@ -333,17 +397,14 @@ class PolyglotAudioEngine {
     }
     if (chain.userMuted || chain.whisperMuted) return;
 
-    const binary = atob(pcmBase64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    const int16 = new Int16Array(bytes.buffer);
-    if (int16.length === 0) return;
+    const int16 = frame.pcm;
+    if (!int16 || int16.length === 0) return;
 
-    const audioBuf = this.ctx.createBuffer(1, int16.length, sampleRate || 24000);
+    const audioBuf = this.ctx.createBuffer(1, int16.length, frame.sampleRate || 24000);
     const chData = audioBuf.getChannelData(0);
-    for (let i = 0; i < int16.length; i++) {
-      chData[i] = int16[i] / 32768;
-    }
+    const toFloat = window.RelayProtocol.int16ToFloat32;
+    const floatData = toFloat(int16);
+    chData.set(floatData);
 
     const now = this.ctx.currentTime;
     const hasGap = chain.nextRelayTime < now || chain.nextRelayTime > now + 0.35;
@@ -372,18 +433,30 @@ class PolyglotAudioEngine {
     this.applyChainState(chain, mode, peerState?.dspPreset || null);
   }
 
-  setPeerVolume(clientId, volume) {
+  /** Stores per-peer audio prefs in the engine so they survive chain replacement. */
+  setPeerAudioPref(clientId, patch) {
+    const prev = this.peerAudioPrefs.get(clientId) || {};
+    const next = {
+      volume: typeof patch?.volume === 'number'
+        ? Math.max(0, Math.min(2, patch.volume))
+        : (prev.volume ?? 1.0),
+      muted: patch?.muted === undefined ? (prev.muted ?? false) : !!patch.muted
+    };
+    this.peerAudioPrefs.set(clientId, next);
     const chain = this.peerChains.get(clientId);
-    if (!chain) return;
-    chain.userVolume = Math.max(0, Math.min(2, volume));
-    this.syncChainOutputGain(chain);
+    if (chain) {
+      chain.userVolume = next.volume;
+      chain.userMuted = next.muted;
+      this.syncChainOutputGain(chain);
+    }
+  }
+
+  setPeerVolume(clientId, volume) {
+    this.setPeerAudioPref(clientId, { volume });
   }
 
   setPeerMuted(clientId, muted) {
-    const chain = this.peerChains.get(clientId);
-    if (!chain) return;
-    chain.userMuted = !!muted;
-    this.syncChainOutputGain(chain);
+    this.setPeerAudioPref(clientId, { muted });
   }
 
   detachPeerStream(clientId) {
@@ -394,21 +467,13 @@ class PolyglotAudioEngine {
   }
 
   destroyChain(chain) {
-    try { chain.chorusLfo.stop(); } catch {}
+    this.releaseChainBus(chain);
     try {
       chain.source?.disconnect();
       chain.inputNode.disconnect();
       chain.hpFilter.disconnect();
       chain.lpFilter.disconnect();
-      chain.scrambler.disconnect();
-      chain.filter.disconnect();
-      chain.chorusDelay.disconnect();
-      chain.chorusWetGain.disconnect();
-      chain.convolver.disconnect();
-      chain.reverbWetGain.disconnect();
-      chain.dryGain.disconnect();
-      chain.processedGain.disconnect();
-      chain.masterGain.disconnect();
+      chain.sendGain.disconnect();
     } catch {}
     if (chain.audioEl) {
       chain.audioEl.srcObject = null;
@@ -476,52 +541,24 @@ class PolyglotAudioEngine {
     this.localMakeupGain.connect(this.localGateGain);
     this.localGateGain.connect(this.localDest);
 
-    // Optional relay capture node retained on `this` so GC never collects it while active
-    this.relayProcessor = ctx.createScriptProcessor(2048, 1, 1);
+    // Relay capture tap retained on `this` so GC never collects it while active.
+    // The worklet encodes PCM off the main thread and transfers 20 ms Int16 chunks.
+    this.relayTap = new AudioWorkletNode(ctx, 'polyglot-relay-tap-processor', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [1]
+    });
+    this.relayTap.port.onmessage = (event) => {
+      const data = event.data || {};
+      if (!data.pcm || this.relayTargetsCount <= 0 || !this.onAudioRelayChunk) return;
+      this.onAudioRelayChunk(new Int16Array(data.pcm), data.sampleRate || 24000);
+    };
+    this.relayTap.port.postMessage({ enabled: this.relayTargetsCount > 0 });
     this.silentMonitorGain = ctx.createGain();
     this.silentMonitorGain.gain.value = 0;
-    this.localGateGain.connect(this.relayProcessor);
-    this.relayProcessor.connect(this.silentMonitorGain);
+    this.localGateGain.connect(this.relayTap);
+    this.relayTap.connect(this.silentMonitorGain);
     this.silentMonitorGain.connect(ctx.destination);
-
-    this.relayProcessor.onaudioprocess = (ev) => {
-      if (this.relayTargetsCount <= 0 || !this.onAudioRelayChunk) return;
-      const track = this.rawLocalStream?.getAudioTracks()[0];
-      if (!track || !track.enabled) return;
-
-      const input = ev.inputBuffer.getChannelData(0);
-      let peak = 0;
-      for (let i = 0; i < input.length; i++) {
-        const av = Math.abs(input[i]);
-        if (av > peak) peak = av;
-      }
-      const nowMs = Date.now();
-      if (peak > 0.0008) {
-        this.relayHoldUntil = nowMs + 800;
-      }
-      if (nowMs >= this.relayHoldUntil) return;
-
-      const inRate = ctx.sampleRate;
-      const outRate = 24000;
-      const ratio = inRate / outRate;
-      const outLen = Math.floor(input.length / ratio);
-      const int16 = new Int16Array(outLen);
-
-      for (let i = 0; i < outLen; i++) {
-        const start = Math.floor(i * ratio);
-        const end = Math.min(input.length, Math.floor((i + 1) * ratio));
-        let sum = 0;
-        for (let j = start; j < end; j++) sum += input[j];
-        const sample = sum / Math.max(1, end - start);
-        const clamped = Math.max(-1, Math.min(1, sample));
-        int16[i] = clamped < 0 ? clamped * 32768 : clamped * 32767;
-      }
-
-      const bytes = new Uint8Array(int16.buffer);
-      let bin = '';
-      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-      this.onAudioRelayChunk(btoa(bin), outRate);
-    };
 
     this.gatedLocalStream = this.localDest.stream;
 
@@ -587,7 +624,8 @@ class PolyglotAudioEngine {
   }
 
   teardownLocalPipeline() {
-    try { this.relayProcessor?.disconnect(); } catch {}
+    try { this.relayTap?.port.postMessage({ enabled: false }); } catch {}
+    try { this.relayTap?.disconnect(); } catch {}
     try { this.silentMonitorGain?.disconnect(); } catch {}
     try { this.localSource?.disconnect(); } catch {}
     try { this.localHpFilter?.disconnect(); } catch {}
@@ -595,9 +633,8 @@ class PolyglotAudioEngine {
     try { this.localCompressor?.disconnect(); } catch {}
     try { this.localMakeupGain?.disconnect(); } catch {}
     try { this.localGateGain?.disconnect(); } catch {}
-    this.relayProcessor = null;
+    this.relayTap = null;
     this.silentMonitorGain = null;
-    this.relayHoldUntil = 0;
     this.localSource = null;
     this.localHpFilter = null;
     this.localLpFilter = null;
@@ -611,6 +648,9 @@ class PolyglotAudioEngine {
 
   setRelayTargetsCount(count) {
     this.relayTargetsCount = Math.max(0, Number(count) || 0);
+    if (this.relayTap) {
+      try { this.relayTap.port.postMessage({ enabled: this.relayTargetsCount > 0 }); } catch {}
+    }
   }
 
   setNoiseGateThreshold(threshold) {
@@ -618,12 +658,11 @@ class PolyglotAudioEngine {
     this.noiseGateThreshold = Math.max(0.0002, Math.min(0.15, Number.isFinite(parsed) ? parsed : 0.0012));
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
-    for (const chain of this.peerChains.values()) {
-      chain.scrambler.parameters.get('noiseGateThreshold').setTargetAtTime(this.noiseGateThreshold, now, 0.02);
-    }
-    if (this.selfMonitorChain) {
-      this.selfMonitorChain.scrambler.parameters.get('noiseGateThreshold').setTargetAtTime(this.noiseGateThreshold, now, 0.02);
-    }
+    this.buses.forEach((bus) => {
+      try {
+        bus.scrambler.parameters.get('noiseGateThreshold').setTargetAtTime(this.noiseGateThreshold, now, 0.02);
+      } catch {}
+    });
   }
 
   setAtmosphericEnabled(enabled) {

@@ -671,6 +671,54 @@ input:focus, select:focus, textarea:focus {
   color: var(--weathered-ash);
 }
 
+/* Global signaling/session status (WS reconnect + resync visibility). */
+.session-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  color: var(--weathered-ash);
+}
+
+.session-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--weathered-ash);
+  flex-shrink: 0;
+}
+
+.session-status[data-state="online"] { color: var(--emerald-sage); }
+.session-status[data-state="online"] .session-status-dot {
+  background: var(--emerald-sage);
+  box-shadow: 0 0 6px rgba(46, 158, 115, 0.7);
+}
+
+.session-status[data-state="connecting"],
+.session-status[data-state="syncing"],
+.session-status[data-state="reconnecting"] { color: var(--bright-brass); }
+
+.session-status[data-state="connecting"] .session-status-dot,
+.session-status[data-state="syncing"] .session-status-dot,
+.session-status[data-state="reconnecting"] .session-status-dot {
+  background: var(--bright-brass);
+  animation: conn-pulse 1.4s ease-in-out infinite;
+}
+
+.session-status[data-state="offline"] { color: var(--crimson-wax); }
+.session-status[data-state="offline"] .session-status-dot {
+  background: var(--crimson-wax);
+  box-shadow: 0 0 6px rgba(185, 56, 56, 0.7);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-status .session-status-dot,
+  .conn-dot.reconnecting {
+    animation: none;
+  }
+}
+
 .hover-hint {
   color: var(--bright-brass);
   font-weight: 500;
@@ -963,6 +1011,45 @@ input:focus, select:focus, textarea:focus {
 .conn-dot.relay {
   background: #a78bfa;
   box-shadow: 0 0 6px rgba(167, 139, 250, 0.7);
+}
+
+/* Degraded/recovery states: distinct shape + label text, not color alone. */
+.conn-dot.reconnecting {
+  background: var(--bright-brass);
+  border-radius: 2px;
+  animation: conn-pulse 1.4s ease-in-out infinite;
+}
+
+.conn-dot.failed {
+  background: var(--crimson-wax);
+  border-radius: 2px;
+  box-shadow: 0 0 6px rgba(185, 56, 56, 0.7);
+}
+
+@keyframes conn-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.peer-card[data-conn-state="reconnecting"],
+.peer-card[data-conn-state="failed"] {
+  border-color: rgba(229, 190, 117, 0.5);
+}
+
+.peer-card[data-conn-state="failed"] {
+  border-color: rgba(185, 56, 56, 0.55);
+}
+
+.peer-card .peer-reconnect-btn:disabled,
+.peer-card .peer-whisper-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.peer-card .peer-mute-btn[aria-pressed="true"],
+.peer-card .peer-whisper-btn[aria-pressed="true"] {
+  border-color: var(--bright-brass);
+  color: var(--bright-brass);
 }
 
 .mic-dot {

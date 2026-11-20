@@ -2,3 +2,5 @@ node_modules/
 *.tmp
 .env
 *.log
+# Runtime state cache (KV mode); the git-tracked seed campaign-state.json stays.
+data/runtime-state.json

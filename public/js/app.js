@@ -26,10 +26,19 @@
     peers: new Map(), // clientId -> peer object
     peerConnections: new Map(), // clientId -> RTCPeerConnection
     peerSenders: new Map(), // clientId -> RTCRtpSender
-    peerConnStates: new Map(), // clientId -> 'connecting' | 'connected' | 'relay'
-    peerConnTimers: new Map(), // clientId -> timeout id
+    peerConnStates: new Map(), // clientId -> 'connecting' | 'connected' | 'relay' | 'reconnecting'
+    peerConnTimers: new Map(), // clientId -> timeout id (unused legacy hook)
     pendingIceCandidates: new Map(), // clientId -> RTCIceCandidateInit[]
     relayTargetIds: new Set(),
+    relaySequence: 0,
+    serverBuildId: null, // changes when a new deploy takes over
+    joinPayload: null,
+    reconnectAttempt: 0,
+    reconnectTimer: null,
+    transports: new Map(), // clientId -> TransportStateMachine
+    negotiators: new Map(), // clientId -> PerfectNegotiator
+    pcGenerations: new Map(), // clientId -> number (guards stale async work)
+    maxIceCandidates: 64,
     peerPrefs: loadPeerPrefs(), // charKey -> { volume, muted }
     messages: [],
     localStream: null,
@@ -99,6 +108,20 @@
     }
   }
 
+  function wsSendBinary(buffer) {
+    if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+      state.ws.send(buffer);
+    }
+  }
+
+  function setSessionStatus(status, text) {
+    const el = $('sessionStatus');
+    if (!el) return;
+    el.dataset.state = status;
+    const label = $('sessionStatusText');
+    if (label) label.textContent = text;
+  }
+
   const DEFAULT_GLYPHS = {
     common: '◈',
     elvish: '❧',
@@ -154,10 +177,21 @@
   }
 
   // -------------------- LOBBY --------------------
-  async function loadLobby() {
+  async function loadLobby(attempt = 0) {
     try {
-      const res = await fetch('/api/lobby');
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 12000);
+      let res;
+      try {
+        res = await fetch('/api/lobby', { signal: controller.signal });
+      } finally {
+        clearTimeout(timeout);
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
+      if (data.buildId) state.serverBuildId = data.buildId;
+      $('lobbyError').classList.add('hidden');
+
       const grid = $('lobbyCharacters');
       grid.innerHTML = '';
 
@@ -184,7 +218,12 @@
         connectAndJoin({ role: 'player', characterId: preselectChar });
       }
     } catch (err) {
-      showLobbyError('Не вдалося завантажити список персонажів із сервера.');
+      if (attempt < 3) {
+        showLobbyError('Сервер прокидається... зачекайте кілька секунд.');
+        setTimeout(() => loadLobby(attempt + 1), 2500 * (attempt + 1));
+      } else {
+        showLobbyError('Не вдалося завантажити список персонажів із сервера.');
+      }
     }
   }
 
@@ -194,6 +233,27 @@
     el.classList.remove('hidden');
   }
 
+  // Render may switch traffic to a new instance up to a minute before it stops
+  // the old one. Move clients immediately so they do not keep mutating a stale
+  // in-memory state that would later be flushed over the new instance's data.
+  function watchServerBuild() {
+    setInterval(async () => {
+      if (!state.clientId || !state.joinPayload || state.intentionalLeave) return;
+      try {
+        const res = await fetch('/api/lobby', { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!state.serverBuildId) {
+          state.serverBuildId = data.buildId;
+        } else if (data.buildId && data.buildId !== state.serverBuildId) {
+          state.serverBuildId = data.buildId;
+          connectAndJoin(state.joinPayload);
+        }
+      } catch {}
+    }, 10000);
+  }
+  watchServerBuild();
+
   $('dmLoginForm').addEventListener('submit', (e) => {
     e.preventDefault();
     const pin = $('dmPinInput').value.trim();
@@ -201,39 +261,84 @@
   });
 
   // -------------------- WEBSOCKET CONNECTION --------------------
-  function connectAndJoin(joinPayload) {
+  function connectAndJoin(joinPayload, attempt = 0) {
     audioEngine.ensureInitialized().catch(() => {});
+    state.intentionalLeave = false;
+    state.joinPayload = joinPayload;
+    if (state.reconnectTimer) {
+      clearTimeout(state.reconnectTimer);
+      state.reconnectTimer = null;
+    }
     if (state.ws) {
       try { state.ws.close(); } catch {}
     }
+    setSessionStatus(state.clientId ? 'reconnecting' : 'connecting',
+      state.clientId ? 'Відновлення з’єднання...' : 'Підключення...');
 
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(`${proto}//${window.location.host}`);
+    ws.binaryType = 'arraybuffer';
     state.ws = ws;
 
     ws.onopen = () => {
-      wsSend({ type: 'JOIN', ...joinPayload });
+      if (state.ws !== ws) return;
+      setSessionStatus('syncing', 'Синхронізація...');
+      wsSend({ type: 'JOIN', relayProtocol: 2, ...joinPayload });
     };
 
-    ws.onmessage = (event) => {
+    ws.onmessage = async (event) => {
+      if (state.ws !== ws) return;
+      if (event.data instanceof ArrayBuffer) {
+        try {
+          const frame = RelayProtocol.decodeRelayFrame(event.data);
+          const peerState = state.peers.get(frame.senderId);
+          if (peerState) noteRelayFrame(frame.senderId);
+          await audioEngine.playRelayedAudioChunk(frame.senderId, frame, peerState);
+        } catch (err) {
+          console.warn('Dropped malformed relay frame:', err.message);
+        }
+        return;
+      }
       let msg;
       try { msg = JSON.parse(event.data); } catch { return; }
-      handleServerMessage(msg);
+      // handleServerMessage is async; never leave a rejected negotiation unhandled.
+      handleServerMessage(msg).catch((err) => {
+        console.error('[ws] message handler failed:', err);
+      });
     };
 
     ws.onclose = () => {
-      if (state.clientId && !state.intentionalLeave) {
-        showToast('З’єднання з сервером розірвано. Оновіть сторінку для повторного входу.');
+      if (state.ws !== ws || state.intentionalLeave) return;
+      if (!state.clientId) {
+        if (attempt < 3) {
+          showLobbyError('Сервер прокидається... повторюємо підключення.');
+          state.reconnectTimer = setTimeout(() => connectAndJoin(joinPayload, attempt + 1), 2500 * (attempt + 1));
+        }
+        return;
       }
+      state.reconnectAttempt++;
+      if (state.reconnectAttempt > 8) {
+        setSessionStatus('offline', 'З’єднання втрачено');
+        showToast('Не вдалося відновити з’єднання. Оновіть сторінку.');
+        return;
+      }
+      const delay = Math.min(30000, 1000 * (2 ** Math.max(0, state.reconnectAttempt - 1)));
+      setSessionStatus('reconnecting', `Відновлення з’єднання... (спроба ${state.reconnectAttempt})`);
+      state.reconnectTimer = setTimeout(() => connectAndJoin(joinPayload, state.reconnectAttempt), delay);
     };
   }
 
   function sendCleanLeave() {
     state.intentionalLeave = true;
+    if (state.reconnectTimer) {
+      clearTimeout(state.reconnectTimer);
+      state.reconnectTimer = null;
+    }
     wsSend({ type: 'LEAVE' });
     if (state.ws) {
       try { state.ws.close(1000, 'User left'); } catch {}
     }
+    setSessionStatus('offline', 'Ви вийшли');
   }
 
   window.addEventListener('beforeunload', () => {
@@ -255,8 +360,12 @@
         state.characters = msg.characters || [];
         state.messages = msg.messages || [];
 
-        state.peers.clear();
-        (msg.peers || []).forEach((p) => state.peers.set(p.clientId, p));
+        // A new clientId means every existing PC was negotiated under the old
+        // identity; rebuild them from the authoritative snapshot below.
+        resetPeerSessions();
+        state.reconnectAttempt = 0;
+        setSessionStatus('online', 'З’єднано');
+        const joinedPeers = msg.peers || [];
 
         $('lobbyOverlay').classList.add('hidden');
         $('appShell').classList.remove('hidden');
@@ -273,20 +382,18 @@
         }
 
         initNoiseGateFromStorage();
+
+        // Initialize microphone first so new peer connections get the outgoing
+        // track; reconcile the peer list before rendering so cards are current.
+        await initLocalAudio();
+        applyPeerSnapshot(joinedPeers);
+
         renderIdentityHeader();
         renderLanguagePanel();
         renderPeersGrid();
         renderDmDashboard();
         renderChatMessages();
         updateActiveLanguageVisuals();
-
-        // Initialize microphone & WebRTC connections (only for peers without an already-active PC)
-        await initLocalAudio();
-        for (const peer of state.peers.values()) {
-          if (!state.peerConnections.has(peer.clientId)) {
-            setupPeerConnection(peer.clientId);
-          }
-        }
         break;
 
       case 'STATE_SYNC':
@@ -294,17 +401,14 @@
         state.activeLanguageId = msg.activeLanguageId || state.activeLanguageId;
         state.languages = msg.languages || [];
         state.characters = msg.characters || [];
-        state.messages = msg.messages || [];
+        if (Array.isArray(msg.messages)) state.messages = msg.messages;
 
         if (state.role === 'dm' && msg.fullStateSnapshot) {
           state.latestSnapshot = msg.fullStateSnapshot;
           saveDmBackup(msg.fullStateSnapshot);
         }
 
-        (msg.peers || []).forEach((p) => {
-          state.peers.set(p.clientId, p);
-          audioEngine.updatePeerLanguage(p.clientId, p);
-        });
+        applyPeerSnapshot(msg.peers || []);
 
         renderIdentityHeader();
         renderLanguagePanel();
@@ -338,11 +442,16 @@
         break;
 
       case 'AUDIO_RELAY_CHUNK': {
+        // Legacy base64 form, kept so an older server deployment still works.
         const peerState = state.peers.get(msg.fromClientId);
-        if (peerState && !state.relayTargetIds.has(msg.fromClientId)) {
-          setPeerConnState(msg.fromClientId, 'relay');
-        }
-        await audioEngine.playRelayedAudioChunk(msg.fromClientId, msg.pcmBase64, msg.sampleRate, peerState);
+        if (peerState) noteRelayFrame(msg.fromClientId);
+        const binary = atob(msg.pcmBase64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        await audioEngine.playRelayedAudioChunk(msg.fromClientId, {
+          pcm: new Int16Array(bytes.buffer),
+          sampleRate: msg.sampleRate
+        }, peerState);
         break;
       }
 
@@ -355,8 +464,10 @@
 
       case 'PEER_JOINED':
         state.peers.set(msg.peer.clientId, msg.peer);
+        setupPeerConnection(msg.peer.clientId).catch((err) => {
+          console.warn('[webrtc] peer setup failed:', msg.peer.clientId, err.message);
+        });
         renderPeersGrid();
-        setupPeerConnection(msg.peer.clientId);
         break;
 
       case 'PEER_LEFT':
@@ -434,14 +545,17 @@
         break;
 
       case 'WEBRTC_OFFER':
+        if (!isFreshSignaling(msg)) break;
         await handleWebRtcOffer(msg.fromClientId, msg.payload);
         break;
 
       case 'WEBRTC_ANSWER':
+        if (!isFreshSignaling(msg)) break;
         await handleWebRtcAnswer(msg.fromClientId, msg.payload);
         break;
 
       case 'WEBRTC_ICE':
+        if (!isFreshSignaling(msg)) break;
         await handleWebRtcIce(msg.fromClientId, msg.payload);
         break;
 
@@ -481,14 +595,20 @@
         if (selfCard) selfCard.classList.toggle('speaking', isSpeaking);
       };
 
-      audioEngine.onAudioRelayChunk = (pcmBase64, sampleRate) => {
-        if (state.relayTargetIds.size === 0) return;
-        wsSend({
-          type: 'AUDIO_RELAY_CHUNK',
-          targetClientIds: [...state.relayTargetIds],
-          pcmBase64,
-          sampleRate
-        });
+      audioEngine.onAudioRelayChunk = (pcmInt16, sampleRate) => {
+        if (state.relayTargetIds.size === 0 || !state.clientId) return;
+        try {
+          const frame = RelayProtocol.encodeRelayFrame({
+            senderId: state.clientId,
+            targetIds: [...state.relayTargetIds],
+            sampleRate,
+            sequence: state.relaySequence++,
+            pcm: pcmInt16
+          });
+          wsSendBinary(frame);
+        } catch (err) {
+          console.warn('Dropped relay chunk:', err.message);
+        }
       };
 
       const outgoingTrack = state.outgoingStream.getAudioTracks()[0] || track;
@@ -617,33 +737,143 @@
     }, 80);
   });
 
-  function setPeerConnState(peerId, connState) {
-    state.peerConnStates.set(peerId, connState);
-    if (connState === 'relay') {
-      state.relayTargetIds.add(peerId);
-    } else if (connState === 'connected') {
-      state.relayTargetIds.delete(peerId);
-    }
-    audioEngine.setRelayTargetsCount(state.relayTargetIds.size);
-
-    const badge = document.querySelector(`.peer-card[data-client-id="${peerId}"] .peer-conn-label`);
-    if (badge) {
-      badge.innerHTML = formatConnStateLabel(connState);
-    }
-  }
-
   function formatConnStateLabel(connState) {
     if (connState === 'connected') return '<span class="conn-dot connected"></span><span>Прямий зв’язок</span>';
     if (connState === 'relay') return '<span class="conn-dot relay"></span><span>Ретранслятор</span>';
+    if (connState === 'reconnecting') return '<span class="conn-dot reconnecting"></span><span>Перепідключення...</span>';
+    if (connState === 'failed') return '<span class="conn-dot failed"></span><span>Немає зв’язку</span>';
     return '<span class="conn-dot connecting"></span><span>З’єднання...</span>';
   }
 
+  function setPeerConnState(peerId, connState) {
+    if (state.peerConnStates.get(peerId) === connState) return;
+    state.peerConnStates.set(peerId, connState);
+    if (connState === 'relay') state.relayTargetIds.add(peerId);
+    else state.relayTargetIds.delete(peerId);
+    audioEngine.setRelayTargetsCount(state.relayTargetIds.size);
+
+    const card = document.querySelector(`.peer-card[data-client-id="${peerId}"]`);
+    if (card) card.dataset.connState = connState;
+    const badge = document.querySelector(`.peer-card[data-client-id="${peerId}"] .peer-conn-label`);
+    if (badge) {
+      badge.innerHTML = formatConnStateLabel(connState);
+      badge.dataset.connState = connState;
+    }
+  }
+
+  function getTransport(peerId) {
+    let transport = state.transports.get(peerId);
+    if (!transport) {
+      transport = new window.PeerSession.TransportStateMachine({
+        fallbackMs: 12000, baseBackoffMs: 1000, maxBackoffMs: 30000
+      });
+      transport.reset(Date.now());
+      state.transports.set(peerId, transport);
+    }
+    return transport;
+  }
+
+  function noteRelayFrame(peerId) {
+    const action = getTransport(peerId).noteRelayAvailable(Date.now());
+    if (action === 'use-relay') setPeerConnState(peerId, 'relay');
+  }
+
+  function isFreshSignaling(msg) {
+    // The server stamps fromClientId from the authenticated socket. Sessions get
+    // a new id on every join, so stale signaling drops out naturally when the
+    // peer snapshot is reconciled — no client-controlled epoch comparison.
+    return typeof msg.fromClientId === 'string' && state.peers.has(msg.fromClientId);
+  }
+
+  function plainDescription(value) {
+    if (!value) return value;
+    const plain = typeof value.toJSON === 'function' ? value.toJSON() : { ...value };
+    if (plain.type === undefined && value.type !== undefined) plain.type = value.type;
+    if (plain.sdp === undefined && value.sdp !== undefined) plain.sdp = value.sdp;
+    return plain;
+  }
+
+  function plainCandidate(value) {
+    return value && typeof value.toJSON === 'function' ? value.toJSON() : value;
+  }
+
+  function getNegotiator(peerId) {
+    let negotiator = state.negotiators.get(peerId);
+    if (!negotiator) {
+      negotiator = new window.PeerSession.PerfectNegotiator({
+        polite: state.clientId > peerId,
+        send: (description) => {
+          wsSend({
+            type: description.type === 'offer' ? 'WEBRTC_OFFER' : 'WEBRTC_ANSWER',
+            targetClientId: peerId,
+            payload: plainDescription(description)
+          });
+        }
+      });
+      state.negotiators.set(peerId, negotiator);
+    }
+    // clientId changes on every WS reconnect; politeness must follow it or both
+    // sides can end up impolite and deadlock on glare.
+    negotiator.polite = state.clientId > peerId;
+    return negotiator;
+  }
+
+  /** Drops all WebRTC state built under a previous local clientId. */
+  function resetPeerSessions() {
+    for (const peerId of [...state.peers.keys()]) cleanupPeerConnection(peerId);
+    state.peers = new Map();
+    state.peerConnections.clear();
+    state.peerSenders.clear();
+    state.peerConnStates.clear();
+    state.peerConnTimers.clear();
+    state.pendingIceCandidates.clear();
+    state.relayTargetIds.clear();
+    state.transports.clear();
+    state.negotiators.clear();
+    state.pcGenerations.clear();
+    audioEngine.setRelayTargetsCount(0);
+  }
+
+  function applyPeerSnapshot(snapshotPeers) {
+    const snapshot = new Map((snapshotPeers || []).map((p) => [p.clientId, p]));
+    const diff = window.PeerSession.reconcilePeers(state.peers, snapshot);
+    for (const id of diff.removed) cleanupPeerConnection(id);
+    state.peers = snapshot;
+    for (const peer of diff.added) {
+      setupPeerConnection(peer.clientId).catch((err) => {
+        console.error('[webrtc] setup failed:', peer.clientId, err.message);
+      });
+    }
+    for (const peer of diff.updated) {
+      audioEngine.updatePeerLanguage(peer.clientId, peer);
+    }
+  }
+
   async function setupPeerConnection(peerId, forceInitiator = false) {
-    cleanupPeerConnection(peerId);
+    cleanupPeerConnection(peerId, { keepTransport: true });
+    const transport = getTransport(peerId);
+    transport.reset(Date.now());
     setPeerConnState(peerId, 'connecting');
 
-    const pc = new RTCPeerConnection(ICE_CONFIG);
+    const generation = (state.pcGenerations.get(peerId) || 0) + 1;
+    state.pcGenerations.set(peerId, generation);
+    const isCurrent = (pc) =>
+      state.pcGenerations.get(peerId) === generation &&
+      state.peerConnections.get(peerId) === pc &&
+      pc.signalingState !== 'closed';
+
+    let pc;
+    try {
+      pc = new RTCPeerConnection(ICE_CONFIG);
+    } catch (err) {
+      setPeerConnState(peerId, 'failed');
+      throw err;
+    }
     state.peerConnections.set(peerId, pc);
+    const negotiator = getNegotiator(peerId);
+
+    const peer = state.peers.get(peerId);
+    if (peer) audioEngine.setPeerAudioPref(peerId, getPeerAudioPref(peer));
 
     const streamForSend = state.outgoingStream || state.localStream;
     const track = streamForSend?.getAudioTracks()[0];
@@ -651,121 +881,175 @@
     if (track) {
       sender = pc.addTrack(track, streamForSend);
     } else {
-      const transceiver = pc.addTransceiver('audio', { direction: 'sendrecv' });
-      sender = transceiver.sender;
+      sender = pc.addTransceiver('audio', { direction: 'sendrecv' }).sender;
     }
     state.peerSenders.set(peerId, sender);
 
-    const fallbackTimer = setTimeout(() => {
-      const st = state.peerConnStates.get(peerId);
-      if (st !== 'connected') {
-        setPeerConnState(peerId, 'relay');
-      }
-    }, 12000);
-    state.peerConnTimers.set(peerId, fallbackTimer);
-
     const checkConnection = () => {
+      if (!isCurrent(pc)) return;
       const cState = pc.connectionState;
       const iState = pc.iceConnectionState;
       if (cState === 'connected' || iState === 'connected' || iState === 'completed') {
-        clearTimeout(state.peerConnTimers.get(peerId));
+        transport.noteDirectConnected(Date.now());
         setPeerConnState(peerId, 'connected');
-      } else if (cState === 'failed' || iState === 'failed' || cState === 'disconnected') {
-        clearTimeout(state.peerConnTimers.get(peerId));
-        setPeerConnState(peerId, 'relay');
+      } else if (cState === 'failed' || iState === 'failed' || cState === 'disconnected' || cState === 'closed') {
+        transport.noteDirectFailure(Date.now());
+        setPeerConnState(peerId, transport.canSendRelay ? 'relay' : 'reconnecting');
       }
     };
     pc.onconnectionstatechange = checkConnection;
     pc.oniceconnectionstatechange = checkConnection;
 
+    // Perfect negotiation: onnegotiationneeded is the only offer source, so the
+    // answerer never auto-offers after receiving a remote offer.
+    pc.onnegotiationneeded = () => {
+      if (!isCurrent(pc)) return;
+      negotiator.onNegotiationNeeded(pc).catch((err) => {
+        console.warn('[webrtc] negotiation failed:', peerId, err.message);
+      });
+    };
+
     pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        wsSend({ type: 'WEBRTC_ICE', targetClientId: peerId, payload: event.candidate });
-      }
+      if (!event.candidate || !isCurrent(pc)) return;
+      const candidate = event.candidate.toJSON ? event.candidate.toJSON() : event.candidate;
+      wsSend({ type: 'WEBRTC_ICE', targetClientId: peerId, payload: plainCandidate(candidate) });
     };
 
     pc.ontrack = async (event) => {
+      if (!isCurrent(pc)) return;
       const stream = event.streams[0] || new MediaStream([event.track]);
-      const peerState = state.peers.get(peerId);
-      await audioEngine.attachPeerStream(peerId, stream, peerState);
-      const pref = getPeerAudioPref(peerState);
+      try {
+        await audioEngine.attachPeerStream(peerId, stream, state.peers.get(peerId));
+      } catch (err) {
+        console.warn('[webrtc] attach stream failed:', peerId, err.message);
+        return;
+      }
+      if (!isCurrent(pc)) return;
+      const pref = getPeerAudioPref(state.peers.get(peerId));
       audioEngine.setPeerVolume(peerId, pref.volume);
       audioEngine.setPeerMuted(peerId, pref.muted);
     };
 
-    if (forceInitiator || state.clientId < peerId) {
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      wsSend({ type: 'WEBRTC_OFFER', targetClientId: peerId, payload: offer });
+    if (forceInitiator) {
+      try {
+        await negotiator.onNegotiationNeeded(pc);
+      } catch (err) {
+        console.warn('[webrtc] initial offer failed:', peerId, err.message);
+      }
     }
   }
 
   async function flushPendingIce(peerId, pc) {
     const queued = state.pendingIceCandidates.get(peerId);
-    if (!queued || queued.length === 0) return;
     state.pendingIceCandidates.delete(peerId);
+    if (!queued || queued.length === 0) return;
     for (const cand of queued) {
-      try {
-        await pc.addIceCandidate(new RTCIceCandidate(cand));
-      } catch {}
+      try { await pc.addIceCandidate(new RTCIceCandidate(cand)); } catch {}
     }
   }
 
   async function handleWebRtcOffer(fromPeerId, offer) {
     let pc = state.peerConnections.get(fromPeerId);
-    if (!pc) {
-      await setupPeerConnection(fromPeerId, false);
+    if (!pc || pc.signalingState === 'closed') {
+      await setupPeerConnection(fromPeerId);
       pc = state.peerConnections.get(fromPeerId);
     }
-    await pc.setRemoteDescription(new RTCSessionDescription(offer));
-    await flushPendingIce(fromPeerId, pc);
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    wsSend({ type: 'WEBRTC_ANSWER', targetClientId: fromPeerId, payload: answer });
+    if (!pc) return;
+    const negotiator = getNegotiator(fromPeerId);
+    if (!await negotiator.onRemoteDescription(pc, offer)) return;
+    if (negotiator.shouldAcceptCandidate()) await flushPendingIce(fromPeerId, pc);
   }
 
   async function handleWebRtcAnswer(fromPeerId, answer) {
     const pc = state.peerConnections.get(fromPeerId);
-    if (!pc) return;
-    await pc.setRemoteDescription(new RTCSessionDescription(answer));
-    await flushPendingIce(fromPeerId, pc);
+    if (!pc || pc.signalingState === 'closed') return;
+    const negotiator = getNegotiator(fromPeerId);
+    if (await negotiator.onRemoteDescription(pc, answer)) {
+      await flushPendingIce(fromPeerId, pc);
+    }
   }
 
   async function handleWebRtcIce(fromPeerId, candidate) {
+    const negotiator = getNegotiator(fromPeerId);
+    if (!negotiator.shouldAcceptCandidate()) return;
     const pc = state.peerConnections.get(fromPeerId);
-    if (!pc || !pc.remoteDescription || !pc.remoteDescription.type) {
-      if (!state.pendingIceCandidates.has(fromPeerId)) {
-        state.pendingIceCandidates.set(fromPeerId, []);
-      }
-      state.pendingIceCandidates.get(fromPeerId).push(candidate);
+    if (!pc || pc.signalingState === 'closed' || !pc.remoteDescription || !pc.remoteDescription.type) {
+      const queued = state.pendingIceCandidates.get(fromPeerId) || [];
+      queued.push(candidate);
+      state.pendingIceCandidates.set(fromPeerId, window.PeerSession.capIceQueue(queued, state.maxIceCandidates));
       return;
     }
-    try {
-      await pc.addIceCandidate(new RTCIceCandidate(candidate));
-    } catch {}
+    try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch {}
   }
 
-  function cleanupPeerConnection(peerId) {
+  function cleanupPeerConnection(peerId, options = {}) {
     clearTimeout(state.peerConnTimers.get(peerId));
     state.peerConnTimers.delete(peerId);
     state.peerConnStates.delete(peerId);
     state.pendingIceCandidates.delete(peerId);
     state.relayTargetIds.delete(peerId);
+    state.negotiators.delete(peerId);
+    if (!options.keepTransport) state.transports.delete(peerId);
+    state.pcGenerations.set(peerId, (state.pcGenerations.get(peerId) || 0) + 1);
     audioEngine.setRelayTargetsCount(state.relayTargetIds.size);
     audioEngine.detachPeerStream(peerId);
+
     const pc = state.peerConnections.get(peerId);
     if (pc) {
+      pc.onnegotiationneeded = null;
+      pc.onicecandidate = null;
+      pc.ontrack = null;
+      pc.onconnectionstatechange = null;
+      pc.oniceconnectionstatechange = null;
       try { pc.close(); } catch {}
     }
     state.peerConnections.delete(peerId);
     state.peerSenders.delete(peerId);
   }
 
+  async function restartIce(peerId) {
+    const pc = state.peerConnections.get(peerId);
+    if (pc && pc.signalingState !== 'closed') {
+      try {
+        pc.restartIce();
+        await getNegotiator(peerId).onNegotiationNeeded(pc);
+        return;
+      } catch (err) {
+        console.warn('[webrtc] ICE restart failed:', peerId, err.message);
+      }
+    }
+    await setupPeerConnection(peerId, true);
+  }
+
   async function reconnectPeer(peerId) {
     showToast('Перепідключення аудіо-з’єднання...');
-    await setupPeerConnection(peerId, true);
-    renderPeersGrid();
+    getTransport(peerId).manualReconnect(Date.now());
+    try {
+      await restartIce(peerId);
+    } catch (err) {
+      console.error('[webrtc] manual reconnect failed:', err);
+      setPeerConnState(peerId, 'failed');
+    }
   }
+
+  // Periodic transport ticks recover direct audio after a relay fallback.
+  setInterval(() => {
+    if (!state.clientId) return;
+    const now = Date.now();
+    for (const [peerId, transport] of state.transports) {
+      if (!state.peers.has(peerId)) continue;
+      const action = transport.tick(now);
+      if (action === 'use-relay') {
+        setPeerConnState(peerId, 'relay');
+      } else if (action === 'restart-ice') {
+        // Keep sending relay audio while probing if a relay path is known.
+        if (!transport.relayAvailable) setPeerConnState(peerId, 'reconnecting');
+        restartIce(peerId).catch((err) => {
+          console.warn('[webrtc] scheduled restart failed:', peerId, err.message);
+        });
+      }
+    }
+  }, 1000);
 
   // -------------------- UI RENDERING --------------------
   function renderIdentityHeader() {
@@ -991,6 +1275,7 @@
       const pref = getPeerAudioPref(peer);
       const volPct = Math.round(pref.volume * 100);
       const connState = state.peerConnStates.get(peer.clientId) || 'connecting';
+      card.dataset.connState = connState;
       const isWhisperingToThis = state.whisperTarget &&
         (state.whisperTarget.clientId === peer.clientId ||
           (peer.characterId && state.whisperTarget.characterId === peer.characterId));
@@ -1025,17 +1310,17 @@
         <div class="peer-conn-row">
           <span class="peer-conn-label">${formatConnStateLabel(connState)}</span>
           <div class="peer-actions-row">
-            <button type="button" class="btn btn-sm btn-ghost peer-whisper-btn ${isWhisperingToThis ? 'btn-active' : ''}" title="Телепатичний шепіт лише цьому гравцю">
+            <button type="button" class="btn btn-sm btn-ghost peer-whisper-btn ${isWhisperingToThis ? 'btn-active' : ''}" title="Телепатичний шепіт лише цьому гравцю" aria-label="Телепатичний шепіт для ${escapeHtml(peer.displayName)}" aria-pressed="${isWhisperingToThis ? 'true' : 'false'}">
               Шепіт
             </button>
-            <button type="button" class="btn btn-sm btn-ghost peer-reconnect-btn" title="Перепідключити звук">↻</button>
+            <button type="button" class="btn btn-sm btn-ghost peer-reconnect-btn" title="Перепідключити звук" aria-label="Перепідключити звук для ${escapeHtml(peer.displayName)}">↻</button>
           </div>
         </div>
         <div class="peer-volume-row">
-          <button type="button" class="btn btn-sm btn-ghost peer-mute-btn" title="Вимкнути або увімкнути звук учасника">
+          <button type="button" class="btn btn-sm btn-ghost peer-mute-btn" title="Вимкнути або увімкнути звук учасника" aria-label="Звук ${escapeHtml(peer.displayName)}" aria-pressed="${pref.muted ? 'true' : 'false'}">
             ${pref.muted ? 'Тихо' : 'Звук'}
           </button>
-          <input type="range" min="0" max="2" step="0.05" value="${pref.volume}" />
+          <input type="range" min="0" max="2" step="0.05" value="${pref.volume}" aria-label="Гучність: ${escapeHtml(peer.displayName)}" />
           <span class="peer-vol-pct">${volPct}%</span>
         </div>
       `;
@@ -1074,8 +1359,9 @@
         }
       });
 
-      audioEngine.setPeerVolume(peer.clientId, pref.volume);
-      audioEngine.setPeerMuted(peer.clientId, pref.muted);
+      // Audio prefs are seeded when the peer chain is created (see
+      // setupPeerConnection) and applied by the mute/volume handlers — never
+      // as a side effect of re-rendering the grid.
       grid.appendChild(card);
     }
 

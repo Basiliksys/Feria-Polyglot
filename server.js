@@ -1,116 +1,102 @@
 const express = require('express');
 const http = require('http');
 const path = require('path');
-const fs = require('fs');
 const crypto = require('crypto');
 const { WebSocketServer, WebSocket } = require('ws');
+const {
+  SCRIPT_ALPHABETS,
+  MAX_MESSAGES,
+  clampNum,
+  sanitizeGlyph,
+  normalizeState,
+  CampaignStore
+} = require('./state-store');
+const { validateWsMessage, RateLimiter } = require('./validation');
+const { encodeRelayFrame, decodeRelayFrame, decodeBase64Pcm } = require('./public/js/audio-protocol');
 
 const PORT = Number(process.env.PORT) || 3456;
-const DATA_PATH = path.join(__dirname, 'data', 'campaign-state.json');
+const HOST = process.env.HOST || undefined;
+const KV_CONFIGURED = !!(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
+const DATA_DIR = process.env.STATE_DIR || path.join(__dirname, 'data');
+// Local-only mode keeps the legacy file; KV mode uses a separate cache so the
+// git-tracked seed is never overwritten.
+const DEFAULT_STATE_FILE = KV_CONFIGURED ? 'runtime-state.json' : 'campaign-state.json';
+const DATA_PATH = process.env.STATE_PATH || path.join(DATA_DIR, DEFAULT_STATE_FILE);
+const SEED_PATH = path.join(__dirname, 'data', 'campaign-state.json');
+const DM_PIN = process.env.FERIA_DM_PIN || null;
+// Render exposes RENDER_GIT_COMMIT; local runs fall back to a per-boot id. The
+// browser compares this value and reconnects as soon as a new instance takes over.
+const BUILD_ID = process.env.RENDER_GIT_COMMIT || process.env.FERIA_BUILD_ID || crypto.randomUUID();
+const INSTANCE_ID = crypto.randomUUID();
+const MAX_CONNECTIONS_PER_IP = 24;
+let shuttingDown = false;
 
-// Rune / glyph alphabets per scriptStyle using widely supported Unicode characters
-const SCRIPT_ALPHABETS = {
-  common: 'abcdefghijklmnopqrstuvwxyz',
-  elvish: 'αεηθικλμνξοπρστυφχψωάέήίόύώ',
-  runic: 'ᚠᚢᚦᚨᚱᚲᚷᚹᚺᚾᛁᛃᛇᛈᛉᛊᛏᛒᛖᛗᛚᛜᛞᛟ',
-  infernal: 'ΨΩΔΘΛΞΠΣΦΧѰѮѲѴЖҘҠҤҪҮ†‡§∆∇',
-  draconic: 'ΔΘΛΞΠΣΦΨΩΓΒΖΚΜΠᚠᚲᚺᛉᛏᛒᛗᛟ',
-  druidic: 'ᚠᚦᚱᚲᚹᛁᛃᛈᛊᛏᛖᛚᛞᛟ❦❧✿❀❁✾✽❃',
-  alien: '⊗⊕⊘⊙⊚⊛⊜⊝⊞⊟⊠⊡◈◉◊○◍◎●◐◑⌖⌗',
-  ancient: 'ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩѢѲѴѦ',
-  imperial: '⌸⌖⌗⌬⌭⌸⌹⊞⊟⊠⊡§¶∆0123456789ABCDEF',
-  steppe: 'ҚҒҢҮҰҺӨӘҖӜӞӤӦӨӪӬӮӰӲӴᚠᚱᛏᚺ',
-  cipher: '†‡§¤¿¡‽※◊○●□■△▲▽▼★☆♠♣♥♦'
-};
+const store = new CampaignStore({
+  dataPath: DATA_PATH,
+  seedPath: SEED_PATH === DATA_PATH ? null : SEED_PATH,
+  url: process.env.UPSTASH_REDIS_REST_URL || '',
+  token: process.env.UPSTASH_REDIS_REST_TOKEN || '',
+  key: process.env.STATE_KEY || 'feria:campaign-state',
+  ownerId: INSTANCE_ID
+});
 
-const DEFAULT_GLYPHS = {
-  common: '◈',
-  elvish: '❧',
-  dwarvish: 'ᛏ',
-  draconic: 'Δ',
-  infernal: 'Ψ',
-  abyssal: '⸸',
-  druidic: 'ᛉ',
-  primordial: '≈',
-  deep_speech: '◉',
-  celestial: '✦',
-  thieves_cant: '‡',
-  undercommon: '⊘',
-  kiros_ancient: 'Ѫ',
-  niman_cipher: '⌬',
-  steppe_turs: 'ᚱ',
-  amenemhet: '☽',
-  adrian: '†',
-  liora: 'ᛉ',
-  jagatai: 'ᚱ'
-};
-
-function sanitizeGlyph(icon, id, fallback = '✦') {
-  const str = String(icon || '').trim();
-  if (!str || /\p{Extended_Pictographic}/u.test(str) || str === '⚔️' || str === '⚒️' || str === '👁️' || str === '🗝️' || str === '🕳️' || str === '🕯️' || str === '⚙️' || str === '🗣️' || str === '🛡️') {
-    return DEFAULT_GLYPHS[id] || fallback;
-  }
-  return str;
-}
-
-function sanitizeStateIcons(targetState) {
-  if (!targetState) return;
-  if (Array.isArray(targetState.languages)) {
-    targetState.languages.forEach((l) => {
-      if (l) l.icon = sanitizeGlyph(l.icon, l.id, '✦');
-    });
-  }
-  if (Array.isArray(targetState.characters)) {
-    targetState.characters.forEach((c) => {
-      if (c) c.icon = sanitizeGlyph(c.icon, c.id, '❖');
-    });
-  }
-  if (Array.isArray(targetState.messages)) {
-    targetState.messages.forEach((m) => {
-      if (m) m.senderIcon = sanitizeGlyph(m.senderIcon, m.senderCharacterId, m.senderCharacterId ? '❖' : '♔');
-    });
-  }
-}
-
-let state = loadState();
-sanitizeStateIcons(state);
+let state = normalizeState(null);
+let messages = [];
+let languageIndex = new Map();
+let characterIndex = new Map();
+let indexesVersion = -1;
+let stateVersion = 0;
 const clients = new Map(); // clientId -> client record
-const messages = Array.isArray(state.messages) ? state.messages : []; // Persisted session messages & handouts
-state.messages = messages;
+const stats = { rejectedMessages: 0, droppedAudioChunks: 0 };
 
-function loadState() {
-  try {
-    const raw = fs.readFileSync(DATA_PATH, 'utf8');
-    const parsed = JSON.parse(raw);
-    sanitizeStateIcons(parsed);
-    return parsed;
-  } catch (err) {
-    console.error('Failed to read campaign-state.json:', err);
-    return { dmPin: '1250', languages: [], characters: [], messages: [] };
+const rateLimits = {
+  chat: new RateLimiter({ capacity: 5, refillPerSec: 2 }),
+  mutation: new RateLimiter({ capacity: 10, refillPerSec: 5 }),
+  speaking: new RateLimiter({ capacity: 20, refillPerSec: 20 }),
+  relay: new RateLimiter({ capacity: 131072, refillPerSec: 131072 }),
+  signaling: new RateLimiter({ capacity: 30, refillPerSec: 10 }),
+  pin: new RateLimiter({ capacity: 5, refillPerSec: 1 / 60 })
+};
+
+async function initialize() {
+  if (process.env.NODE_ENV === 'production' && !DM_PIN) {
+    // Never fall back to the public seed PIN on a public deployment.
+    throw new Error('FERIA_DM_PIN must be set in production');
   }
+  // Claim ownership before loading: an older instance must not overwrite KV
+  // during Render's zero-downtime overlap window.
+  await store.claimOwnership();
+  state = await store.load();
+  messages = Array.isArray(state.messages) ? state.messages : [];
+  state.messages = messages;
+  indexesVersion = -1;
+  stateVersion++;
+  const info = store.status();
+  console.log(`[state] storage=${info.storageMode} languages=${state.languages.length} characters=${state.characters.length} messages=${messages.length}`);
+}
+
+function rebuildIndexes() {
+  if (indexesVersion === stateVersion) return;
+  languageIndex = new Map(state.languages.map((l) => [l.id, l]));
+  characterIndex = new Map(state.characters.map((c) => [c.id, c]));
+  indexesVersion = stateVersion;
 }
 
 function saveState() {
-  try {
-    state.messages = messages;
-    const dir = path.dirname(DATA_PATH);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    const tmpPath = DATA_PATH + '.tmp';
-    fs.writeFileSync(tmpPath, JSON.stringify(state, null, 2), 'utf8');
-    fs.renameSync(tmpPath, DATA_PATH);
-  } catch (err) {
-    console.error('Failed to persist campaign-state.json:', err);
-  }
+  if (shuttingDown) return;
+  state.messages = messages;
+  stateVersion++;
+  store.scheduleSave(() => state);
 }
 
 function getLanguageById(languageId) {
-  return state.languages.find((l) => l.id === languageId) || null;
+  rebuildIndexes();
+  return languageIndex.get(languageId) || null;
 }
 
 function getCharacterById(characterId) {
-  return state.characters.find((c) => c.id === characterId) || null;
+  rebuildIndexes();
+  return characterIndex.get(characterId) || null;
 }
 
 function deterministicHash(str) {
@@ -127,8 +113,27 @@ function deterministicHash(str) {
  * punctuation, and word lengths intact. When revealPercent > 0, reveals an exact
  * percentage of words deterministically (stable across 25% -> 50% -> 100%).
  */
+const RUNE_CACHE = new Map();
+const RUNE_CACHE_MAX = 500;
+
 function translateToRunes(text, scriptStyle = 'runic', revealPercent = 0, seed = 1) {
   if (!text) return '';
+  const key = JSON.stringify([scriptStyle, revealPercent, seed, text]);
+  if (RUNE_CACHE.has(key)) {
+    const cached = RUNE_CACHE.get(key);
+    RUNE_CACHE.delete(key);
+    RUNE_CACHE.set(key, cached);
+    return cached;
+  }
+  const value = computeRunes(text, scriptStyle, revealPercent, seed);
+  RUNE_CACHE.set(key, value);
+  if (RUNE_CACHE.size > RUNE_CACHE_MAX) {
+    RUNE_CACHE.delete(RUNE_CACHE.keys().next().value);
+  }
+  return value;
+}
+
+function computeRunes(text, scriptStyle = 'runic', revealPercent = 0, seed = 1) {
   if (revealPercent >= 100) return text;
 
   const alphabetStr = SCRIPT_ALPHABETS[scriptStyle] || SCRIPT_ALPHABETS.runic;
@@ -243,6 +248,8 @@ function isWhisperActive(client) {
 
 function isWhisperAllowed(speakerClient, listenerClient) {
   if (!isWhisperActive(speakerClient)) return true;
+  // DMs already see every whisper in the chat projection; keep audio consistent.
+  if (listenerClient.role === 'dm') return true;
   if (listenerClient.id === speakerClient.id) return true;
   if (speakerClient.whisperTargetClientId && listenerClient.id === speakerClient.whisperTargetClientId) {
     return true;
@@ -408,12 +415,48 @@ function projectMessageForListener(msg, listenerClient) {
 }
 
 function sendJson(ws, payload) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  try {
     ws.send(JSON.stringify(payload));
+  } catch (err) {
+    console.warn('[ws] send failed:', err.message);
   }
 }
 
-function broadcastStateSync() {
+/**
+ * Forwards one decoded relay frame to every allowed target. Protocol-2 clients
+ * receive the original binary frame unchanged; legacy clients receive the old
+ * base64 JSON envelope so a cached client bundle keeps working during rollout.
+ */
+function forwardRelayFrame(sender, frame, rawFrame) {
+  const allowed = new Set(frame.targetIds);
+  let delivered = 0;
+  for (const target of clients.values()) {
+    if (!allowed.has(target.id) || !target.joined || target.id === sender.id) continue;
+    if (!isWhisperAllowed(sender, target)) continue;
+    if (target.ws.readyState !== WebSocket.OPEN) continue;
+
+    try {
+      if (target.relayProtocol === 2) {
+        target.ws.send(rawFrame, { binary: true });
+      } else {
+        sendJson(target.ws, {
+          type: 'AUDIO_RELAY_CHUNK',
+          fromClientId: sender.id,
+          pcmBase64: Buffer.from(frame.pcmBytes).toString('base64'),
+          sampleRate: frame.sampleRate
+        });
+      }
+      delivered++;
+    } catch (err) {
+      stats.droppedAudioChunks++;
+    }
+  }
+  return delivered;
+}
+
+function broadcastStateSync(options = {}) {
+  const includeMessages = options.includeMessages !== false;
   for (const client of clients.values()) {
     if (!client.joined) continue;
     const char = getClientCharacter(client);
@@ -436,9 +479,11 @@ function broadcastStateSync() {
       activeLanguageId: client.activeLanguageId,
       languages: getSpeakableLanguagesForClient(client),
       characters: buildCharactersForClient(client),
-      peers,
-      messages: messages.filter((m) => canSeeMessage(m, client)).map((m) => projectMessageForListener(m, client))
+      peers
     };
+    if (includeMessages) {
+      payload.messages = messages.filter((m) => canSeeMessage(m, client)).map((m) => projectMessageForListener(m, client));
+    }
     if (client.role === 'dm') {
       payload.fullStateSnapshot = buildFullStateSnapshot();
     }
@@ -459,18 +504,44 @@ function broadcastPeerLanguageUpdate(speakerClient) {
 }
 
 const app = express();
-app.use(express.json());
+// One trusted proxy hop in front of Render; X-Forwarded-For alone is untrusted.
+app.set('trust proxy', 1);
+app.use(express.json({ limit: '256kb' }));
+app.use('/api', (_req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  next();
+});
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime(), clients: clients.size });
+  const info = store.status();
+  const unhealthy = info.degraded || (info.kvConfigured && (!info.lastSyncAt || !!info.lastSaveError));
+  res.status(unhealthy ? 503 : 200).json({
+    status: unhealthy ? 'degraded' : 'ok',
+    uptime: process.uptime(),
+    clients: clients.size,
+    ...info,
+    buildId: BUILD_ID,
+    rejectedMessages: stats.rejectedMessages,
+    droppedAudioChunks: stats.droppedAudioChunks
+  });
 });
 
-app.get('/api/export-state', (req, res) => {
-  if (String(req.query.pin || '') !== String(state.dmPin)) {
+app.post('/api/export-state', (req, res) => {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  // Share one bucket with WebSocket DM joins so switching transports cannot
+  // reset the brute-force budget.
+  const bucket = `pin:${ip}`;
+  if (!rateLimits.pin.consume(bucket)) {
+    res.status(429).json({ error: 'Too many attempts' });
+    return;
+  }
+  const expectedPin = DM_PIN || String(state.dmPin);
+  if (String(req.body?.pin || '') !== String(expectedPin)) {
     res.status(403).json({ error: 'Invalid DM PIN' });
     return;
   }
+  rateLimits.pin.reset(bucket);
   res.json(buildFullStateSnapshot());
 });
 
@@ -485,6 +556,7 @@ app.get('/api/lobby', (_req, res) => {
 
   res.json({
     dmOnline,
+    buildId: BUILD_ID,
     characters: state.characters.map((c) => ({
       id: c.id,
       name: c.name,
@@ -496,20 +568,82 @@ app.get('/api/lobby', (_req, res) => {
   });
 });
 
+// Malformed JSON must not leak a development stack trace on a public service.
+app.use((err, _req, res, _next) => {
+  console.error('[http] request error:', err.message);
+  if (!res.headersSent) res.status(400).json({ error: 'Invalid request' });
+});
+
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({
+  server,
+  maxPayload: 64 * 1024,
+  perMessageDeflate: false,
+  verifyClient: (info, done) => {
+    // Non-browser clients (tests, scripts) send no Origin and stay allowed.
+    const origin = info.req.headers.origin;
+    if (!origin) return done(true);
+    const host = info.req.headers.host;
+    if (!host) return done(false);
+    try {
+      const url = new URL(origin);
+      const forwardedProto = String(info.req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+      const expectedProto = forwardedProto || (info.req.socket.encrypted ? 'https' : 'http');
+      // Tunnels may rewrite Host; browsers cannot set X-Forwarded-Host themselves.
+      const forwardedHost = String(info.req.headers['x-forwarded-host'] || '').split(',')[0].trim();
+      const allowedHosts = [host, forwardedHost].filter(Boolean);
+      done(allowedHosts.includes(url.host) && url.protocol === `${expectedProto}:`);
+    } catch {
+      done(false);
+    }
+  }
+});
+wss.on('error', (err) => console.error('[ws] server error:', err.message));
+
+function rateBucketForType(type) {
+  if (type === 'CHAT_MESSAGE') return 'chat';
+  if (type === 'SPEAKING_STATE') return 'speaking';
+  if (type === 'AUDIO_RELAY_CHUNK') return 'relay';
+  if (type === 'WEBRTC_OFFER' || type === 'WEBRTC_ANSWER' || type === 'WEBRTC_ICE') return 'signaling';
+  if (type === 'REVEAL_MESSAGE' || type === 'TRANSLATE_FOR_PARTY' || type === 'DELETE_MESSAGE' ||
+      type === 'CLEAR_CHAT' || type.startsWith('DM_')) return 'mutation';
+  return null;
+}
+
+// Buckets are keyed on the trusted proxy IP plus the joined identity so a
+// reconnect cannot refresh an abuser's budget (and one household does not share
+// a single audio bucket with every other visitor).
+function rateKey(client, bucket) {
+  if (bucket === 'relay') return `${client.id}:relay`;
+  return `${client.ip}:${client.characterId || client.role || 'anon'}:${bucket}`;
+}
 
 function disconnectClient(targetClient, closeWs = true) {
   if (!targetClient) return;
   const wasJoined = targetClient.joined;
   targetClient.joined = false;
+  if (targetClient.joinTimer) {
+    clearTimeout(targetClient.joinTimer);
+    targetClient.joinTimer = null;
+  }
   clients.delete(targetClient.id);
 
   if (wasJoined) {
     for (const other of clients.values()) {
-      if (other.joined) {
-        sendJson(other.ws, { type: 'PEER_LEFT', clientId: targetClient.id });
+      if (!other.joined) continue;
+      if (other.whisperTargetClientId === targetClient.id ||
+          (targetClient.characterId && other.whisperTargetCharacterId === targetClient.characterId)) {
+        other.whisperTargetClientId = null;
+        other.whisperTargetCharacterId = null;
+        sendJson(other.ws, {
+          type: 'SELF_WHISPER_UPDATED',
+          targetClientId: null,
+          targetCharacterId: null,
+          targetName: null
+        });
+        broadcastPeerLanguageUpdate(other);
       }
+      sendJson(other.ws, { type: 'PEER_LEFT', clientId: targetClient.id });
     }
   }
 
@@ -522,11 +656,21 @@ function disconnectClient(targetClient, closeWs = true) {
   }
 }
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  let connectionsFromIp = 0;
+  for (const existing of clients.values()) {
+    if (existing.ip === ip) connectionsFromIp++;
+  }
+  if (connectionsFromIp >= MAX_CONNECTIONS_PER_IP) {
+    try { ws.close(1008, 'Too many connections'); } catch {}
+    return;
+  }
   const clientId = crypto.randomUUID();
   const client = {
     id: clientId,
     ws,
+    ip,
     isAlive: true,
     joined: false,
     role: 'player',
@@ -535,23 +679,92 @@ wss.on('connection', (ws) => {
     whisperTargetClientId: null,
     whisperTargetCharacterId: null,
     isSpeaking: false,
-    speakingLevel: 0
+    speakingLevel: 0,
+    lastSpeakingForwardAt: 0,
+    relayProtocol: 1
   };
   clients.set(clientId, client);
+  client.joinTimer = setTimeout(() => {
+    if (!client.joined && !shuttingDown) {
+      try { ws.terminate(); } catch {}
+      disconnectClient(client, false);
+    }
+  }, 20000);
+  client.joinTimer.unref?.();
+
+  ws.on('error', (err) => {
+    console.warn('[ws] connection error:', err.message);
+  });
 
   ws.on('pong', () => {
     client.isAlive = true;
   });
 
-  ws.on('message', (rawData) => {
+  ws.on('message', (rawData, isBinary) => {
+    // Binary frames are compact PCM relay packets (see public/js/audio-protocol.js).
+    if (isBinary || (Buffer.isBuffer(rawData) && rawData.length > 0 && rawData[0] === 1)) {
+      try {
+        const frame = decodeRelayFrame(rawData);
+        if (!client.joined) return;
+        const cost = frame.pcmBytes.length;
+        if (!rateLimits.relay.consume(rateKey(client, 'relay'), cost)) {
+          stats.droppedAudioChunks++;
+          return;
+        }
+        // The sender is authenticated from the socket, never trusted from the frame.
+        // Re-encoding is only needed if a client tried to spoof the sender field.
+        const outbound = frame.senderId === client.id
+          ? rawData
+          : Buffer.from(encodeRelayFrame({
+            senderId: client.id,
+            targetIds: frame.targetIds,
+            sampleRate: frame.sampleRate,
+            sequence: frame.sequence,
+            pcm: frame.pcm
+          }));
+        frame.senderId = client.id;
+        forwardRelayFrame(client, frame, outbound);
+      } catch (err) {
+        stats.rejectedMessages++;
+      }
+      return;
+    }
+
     let data;
     try {
       data = JSON.parse(rawData.toString());
     } catch {
+      stats.rejectedMessages++;
       return;
     }
 
-    handleMessage(client, data);
+    const error = validateWsMessage(data);
+    if (error) {
+      stats.rejectedMessages++;
+      if (data && (data.type === 'CHAT_MESSAGE' ||
+          (typeof data.type === 'string' && data.type.startsWith('DM_')))) {
+        sendJson(ws, { type: 'ERROR', error });
+      }
+      return;
+    }
+
+    const bucket = rateBucketForType(data.type);
+    if (bucket) {
+      const cost = data.type === 'AUDIO_RELAY_CHUNK' ? data.pcmBase64.length : 1;
+      if (!rateLimits[bucket].consume(rateKey(client, bucket), cost)) {
+        stats.rejectedMessages++;
+        if (bucket === 'chat' || bucket === 'mutation') {
+          sendJson(ws, { type: 'ERROR', error: 'Занадто багато дій, зачекайте.' });
+        }
+        return;
+      }
+    }
+
+    try {
+      handleMessage(client, data);
+    } catch (err) {
+      console.error('[ws] handler error:', err.message);
+    }
   });
 
   ws.on('close', () => {
@@ -574,6 +787,7 @@ const heartbeatTimer = setInterval(() => {
       }
     } catch {}
   }
+  for (const limiter of Object.values(rateLimits)) limiter.prune();
 }, 20000);
 heartbeatTimer.unref();
 
@@ -586,11 +800,30 @@ function handleMessage(client, data) {
 
     case 'JOIN': {
       const role = data.role === 'dm' ? 'dm' : 'player';
+      // LEAVE removes the record; a same-socket JOIN must restore it or the
+      // client can mutate state while being invisible to every broadcast.
+      clients.set(client.id, client);
+      if (client.joinTimer) {
+        clearTimeout(client.joinTimer);
+        client.joinTimer = null;
+      }
+      client.whisperTargetClientId = null;
+      client.whisperTargetCharacterId = null;
+      client.isSpeaking = false;
+      client.speakingLevel = 0;
+      client.relayProtocol = data.relayProtocol === 2 ? 2 : 1;
       if (role === 'dm') {
-        if (String(data.pin || '') !== String(state.dmPin)) {
+        const expectedPin = DM_PIN || String(state.dmPin);
+        const pinBucket = `pin:${client.ip}`;
+        if (!rateLimits.pin.consume(pinBucket)) {
+          sendJson(client.ws, { type: 'JOIN_ERROR', error: 'Забагато спроб входу. Спробуйте пізніше.' });
+          return;
+        }
+        if (String(data.pin || '') !== String(expectedPin)) {
           sendJson(client.ws, { type: 'JOIN_ERROR', error: 'Невірний PIN-код Майстра.' });
           return;
         }
+        rateLimits.pin.reset(pinBucket);
         // Evict any existing ghost/duplicate DM sessions cleanly
         for (const other of [...clients.values()]) {
           if (other.id !== client.id && other.joined && other.role === 'dm') {
@@ -673,8 +906,13 @@ function handleMessage(client, data) {
 
     case 'SPEAKING_STATE': {
       if (!client.joined) return;
+      const wasSpeaking = client.isSpeaking;
       client.isSpeaking = !!data.isSpeaking;
-      client.speakingLevel = Number(data.level) || 0;
+      client.speakingLevel = Math.max(0, Math.min(1, Number(data.level) || 0));
+      const now = Date.now();
+      if (!wasSpeaking && !client.isSpeaking) return;
+      if (client.isSpeaking === wasSpeaking && now - client.lastSpeakingForwardAt < 100) return;
+      client.lastSpeakingForwardAt = now;
       for (const other of clients.values()) {
         if (other.joined && other.id !== client.id) {
           sendJson(other.ws, {
@@ -738,7 +976,7 @@ function handleMessage(client, data) {
       const langId = canSpeak(client.role, char, requestedLangId) ? requestedLangId : 'common';
 
       const wClientId = client.whisperTargetClientId || null;
-      const wCharId = data.whisperTargetCharacterId || client.whisperTargetCharacterId || null;
+      const wCharId = client.whisperTargetCharacterId || null;
       const isWhisper = !!(wClientId || wCharId);
       let whisperTargetName = null;
       if (isWhisper) {
@@ -760,7 +998,7 @@ function handleMessage(client, data) {
         title: data.title ? String(data.title).trim() : null,
         timestamp: Date.now(),
         seed: Math.floor(Math.random() * 1000000) + 1,
-        revealMap: {},
+        revealMap: Object.create(null),
         translatedForParty: false,
         translatedBy: null,
         isWhisper,
@@ -770,7 +1008,7 @@ function handleMessage(client, data) {
       };
 
       messages.push(msg);
-      if (messages.length > 150) {
+      if (messages.length > MAX_MESSAGES) {
         messages.shift();
       }
       saveState();
@@ -792,7 +1030,8 @@ function handleMessage(client, data) {
       if (!msg) return;
 
       const targetCharId = data.characterId || 'ALL';
-      const percent = [0, 25, 50, 100].includes(Number(data.percent)) ? Number(data.percent) : 0;
+      if (targetCharId !== 'ALL' && !getCharacterById(targetCharId)) return;
+      const percent = Number(data.percent);
       msg.revealMap[targetCharId] = percent;
       saveState();
 
@@ -916,7 +1155,7 @@ function handleMessage(client, data) {
         }
       }
 
-      broadcastStateSync();
+      broadcastStateSync({ includeMessages: false });
       break;
     }
 
@@ -933,7 +1172,7 @@ function handleMessage(client, data) {
           broadcastPeerLanguageUpdate(peer);
         }
       }
-      broadcastStateSync();
+      broadcastStateSync({ includeMessages: false });
       break;
     }
 
@@ -951,7 +1190,7 @@ function handleMessage(client, data) {
         char.languages.push(lang.id);
       }
       saveState();
-      broadcastStateSync();
+      broadcastStateSync({ includeMessages: false });
       // Also update speaking language permissions for peers
       for (const peer of clients.values()) {
         if (peer.joined && peer.characterId === char.id) {
@@ -969,7 +1208,7 @@ function handleMessage(client, data) {
 
       char[data.buff] = !!data.value;
       saveState();
-      broadcastStateSync();
+      broadcastStateSync({ includeMessages: false });
       break;
     }
 
@@ -1022,7 +1261,7 @@ function handleMessage(client, data) {
       }
 
       saveState();
-      broadcastStateSync();
+      broadcastStateSync({ includeMessages: false });
       for (const peer of clients.values()) {
         if (peer.joined) broadcastPeerLanguageUpdate(peer);
       }
@@ -1041,7 +1280,7 @@ function handleMessage(client, data) {
         if (c.forcedLanguage === langId) c.forcedLanguage = null;
       });
       saveState();
-      broadcastStateSync();
+      broadcastStateSync({ includeMessages: false });
       break;
     }
 
@@ -1067,7 +1306,7 @@ function handleMessage(client, data) {
         forcedLanguage: null
       });
       saveState();
-      broadcastStateSync();
+      broadcastStateSync({ includeMessages: false });
       break;
     }
 
@@ -1076,7 +1315,7 @@ function handleMessage(client, data) {
       const charId = data.characterId;
       state.characters = state.characters.filter((c) => c.id !== charId);
       saveState();
-      broadcastStateSync();
+      broadcastStateSync({ includeMessages: false });
       break;
     }
 
@@ -1093,14 +1332,12 @@ function handleMessage(client, data) {
         return;
       }
 
-      state.languages = snap.languages;
-      state.characters = snap.characters;
+      const normalized = normalizeState(snap);
+      state.languages = normalized.languages;
+      state.characters = normalized.characters;
       messages.length = 0;
-      if (Array.isArray(snap.messages)) {
-        snap.messages.slice(-150).forEach((m) => messages.push(m));
-      }
+      for (const msg of normalized.messages) messages.push(msg);
       state.messages = messages;
-      sanitizeStateIcons(state);
       saveState();
       broadcastStateSync();
       for (const peer of clients.values()) {
@@ -1111,21 +1348,29 @@ function handleMessage(client, data) {
     }
 
     case 'AUDIO_RELAY_CHUNK': {
-      if (!client.joined || typeof data.pcmBase64 !== 'string' || data.pcmBase64.length > 32768) return;
-      const targetIds = Array.isArray(data.targetClientIds) ? data.targetClientIds : [];
-      const sampleRate = Number(data.sampleRate) || 16000;
-
-      for (const targetId of targetIds) {
-        const target = clients.get(targetId);
-        if (!target || !target.joined || target.id === client.id) continue;
-        if (!isWhisperAllowed(client, target)) continue;
-        sendJson(target.ws, {
-          type: 'AUDIO_RELAY_CHUNK',
-          fromClientId: client.id,
-          pcmBase64: data.pcmBase64,
-          sampleRate
-        });
+      if (!client.joined) return;
+      let pcm;
+      try {
+        pcm = decodeBase64Pcm(data.pcmBase64);
+      } catch {
+        stats.rejectedMessages++;
+        return;
       }
+      const frame = {
+        senderId: client.id,
+        targetIds: data.targetClientIds,
+        sampleRate: Number(data.sampleRate),
+        pcm,
+        pcmBytes: new Uint8Array(pcm.buffer)
+      };
+      const outbound = encodeRelayFrame({
+        senderId: client.id,
+        targetIds: frame.targetIds,
+        sampleRate: frame.sampleRate,
+        sequence: 0,
+        pcm
+      });
+      forwardRelayFrame(client, frame, outbound);
       break;
     }
 
@@ -1134,7 +1379,10 @@ function handleMessage(client, data) {
     case 'WEBRTC_ICE': {
       if (!client.joined || !data.targetClientId) return;
       const target = clients.get(data.targetClientId);
-      if (target && target.joined) {
+      // The server stamps the sender; clients cannot spoof fromClientId. Apply
+      // the same whisper policy as relayed audio so P2P cannot bypass it.
+      if (target && target.joined &&
+          isWhisperAllowed(client, target) && isWhisperAllowed(target, client)) {
         sendJson(target.ws, {
           type: data.type,
           fromClientId: client.id,
@@ -1146,21 +1394,66 @@ function handleMessage(client, data) {
   }
 }
 
-function clampNum(val, min, max, fallback) {
-  const num = Number(val);
-  if (Number.isNaN(num)) return fallback;
-  return Math.max(min, Math.min(max, num));
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[server] ${signal} received, closing connections...`);
+  const forceExit = setTimeout(() => process.exit(1), 8000);
+  forceExit.unref();
+  clearInterval(heartbeatTimer);
+  // Stop new work before the final flush, otherwise a frame arriving during
+  // shutdown can arm a debounce timer that never fires.
+  for (const client of [...clients.values()]) {
+    try { client.ws.close(1001, 'Server shutdown'); } catch {}
+  }
+  try {
+    wss.close();
+    await Promise.race([
+      new Promise((resolve) => server.close(resolve)),
+      new Promise((resolve) => setTimeout(resolve, 2000))
+    ]);
+    if (await store.stillOwner()) {
+      await store.close();
+      console.log('[server] state flushed');
+    } else {
+      store.discardPending();
+      console.log('[server] newer instance active; stale state discarded');
+    }
+  } catch (err) {
+    console.error('[server] shutdown error:', err.message);
+  }
+  process.exit(0);
 }
 
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+// Inert in production (no IPC channel); lets tests exercise the exact same
+// graceful-shutdown path on platforms where SIGTERM cannot be delivered.
+process.on('message', (message) => {
+  if (message === 'graceful-shutdown') shutdown('IPC');
+});
+process.on('unhandledRejection', (reason) => console.error('[server] unhandled rejection:', reason));
+server.on('error', (err) => console.error('[server] error:', err.message));
+server.on('clientError', (_err, socket) => {
+  try { socket.end('HTTP/1.1 400 Bad Request\r\n\r\n'); } catch {}
+});
+
 if (require.main === module) {
-  server.listen(PORT, () => {
-    console.log(`Feria Polyglot server listening on http://localhost:${PORT}`);
+  initialize().then(() => {
+    const onListening = () => console.log(`Feria Polyglot server listening on http://localhost:${PORT}`);
+    if (HOST) server.listen(PORT, HOST, onListening);
+    else server.listen(PORT, onListening);
+  }).catch((err) => {
+    console.error('[server] failed to initialize:', err);
+    process.exit(1);
   });
 }
 
 module.exports = {
   app,
   server,
+  initialize,
+  store,
   translateToRunes,
   canUnderstand,
   canSpeak
