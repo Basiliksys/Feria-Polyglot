@@ -591,13 +591,13 @@
         btn.type = 'button';
         btn.className = `lang-btn ${state.activeLanguageId === lang.id ? 'active' : ''}`;
         btn.style.setProperty('--lang-color', lang.color);
-        btn.innerHTML = `<span>${lang.icon}</span><span>${escapeHtml(lang.name)}</span>`;
+        btn.innerHTML = `<span class="lang-btn-icon">${lang.icon}</span><span class="lang-btn-name">${escapeHtml(lang.name)}</span>`;
 
         if (state.role === 'dm' && lang.id !== 'common') {
           const editSpan = document.createElement('span');
           editSpan.className = 'lang-edit-trigger';
           editSpan.title = 'Налаштувати звук і руни';
-          editSpan.textContent = '⚙️';
+          editSpan.textContent = '❖';
           editSpan.addEventListener('click', (e) => {
             e.stopPropagation();
             openLangBuilder(lang);
