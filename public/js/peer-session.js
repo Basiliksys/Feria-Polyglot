@@ -69,6 +69,11 @@
     return queue.length > max ? queue.slice(queue.length - max) : queue.slice();
   }
 
+  /** Relay must stay armed until a direct connection is confirmed. */
+  function shouldSendRelay(connState) {
+    return connState !== 'connected';
+  }
+
   /** Attaches a session epoch to signaling payloads without losing WebIDL fields. */
   function withEpoch(value, epoch) {
     if (!value) return value;
@@ -113,10 +118,15 @@
       this.lastDirectAt = nowMs;
     }
 
-    /** Inbound relay audio: availability only, never a downgrade by itself. */
+    /**
+     * Inbound relay audio proves a relay path exists. Switch to it immediately
+     * unless a healthy direct connection is already established — waiting for
+     * a fallback timer here leaves peers stuck in "reconnecting" with no audio.
+     */
     noteRelayAvailable(nowMs) {
       this.relayAvailable = true;
-      return this.tick(nowMs);
+      if (this.state === TRANSPORT_STATE.DIRECT) return null;
+      return this.enterRelay(nowMs) ? 'use-relay' : null;
     }
 
     noteDirectFailure(nowMs) {
@@ -129,8 +139,10 @@
     }
 
     enterRelay(nowMs) {
+      if (this.state === TRANSPORT_STATE.RELAY) return false;
       this.state = TRANSPORT_STATE.RELAY;
       this.scheduleProbe(nowMs);
+      return true;
     }
 
     scheduleProbe(nowMs) {
@@ -242,6 +254,7 @@
     peerSignature,
     reconcilePeers,
     capIceQueue,
+    shouldSendRelay,
     withEpoch,
     TransportStateMachine,
     PerfectNegotiator

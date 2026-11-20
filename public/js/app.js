@@ -247,7 +247,10 @@
           state.serverBuildId = data.buildId;
         } else if (data.buildId && data.buildId !== state.serverBuildId) {
           state.serverBuildId = data.buildId;
-          connectAndJoin(state.joinPayload);
+          // A new deploy may ship new browser assets. Reconnecting the socket
+          // alone would keep running the old JS, so do a full reload — the
+          // campaign state comes back from the server on JOIN_SUCCESS.
+          window.location.reload();
         }
       } catch {}
     }, 10000);
@@ -748,7 +751,12 @@
   function setPeerConnState(peerId, connState) {
     if (state.peerConnStates.get(peerId) === connState) return;
     state.peerConnStates.set(peerId, connState);
-    if (connState === 'relay') state.relayTargetIds.add(peerId);
+    // Keep the relay tap armed for every state except a confirmed direct
+    // connection. Otherwise a peer that never establishes WebRTC (common
+    // across restrictive NATs) is never a relay target, so no relay audio is
+    // ever sent, relay availability is never detected, and the UI is stuck on
+    // "Перепідключення..." forever.
+    if (window.PeerSession.shouldSendRelay(connState)) state.relayTargetIds.add(peerId);
     else state.relayTargetIds.delete(peerId);
     audioEngine.setRelayTargetsCount(state.relayTargetIds.size);
 

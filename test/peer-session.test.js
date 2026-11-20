@@ -7,6 +7,7 @@ const {
   TRANSPORT_STATE,
   reconcilePeers,
   capIceQueue,
+  shouldSendRelay,
   withEpoch,
   TransportStateMachine,
   PerfectNegotiator
@@ -56,6 +57,13 @@ test('capIceQueue keeps only the newest candidates', () => {
   assert.deepEqual(capIceQueue([1, 2, 3], 0), [1, 2, 3]);
 });
 
+test('relay stays armed until a direct connection is confirmed', () => {
+  for (const state of ['connecting', 'reconnecting', 'relay', 'failed']) {
+    assert.equal(shouldSendRelay(state), true, `${state} still needs the relay tap`);
+  }
+  assert.equal(shouldSendRelay('connected'), false);
+});
+
 test('withEpoch preserves WebIDL description/candidate fields on the prototype', () => {
   // Some browsers expose type/sdp as prototype accessors, not own properties.
   function FakeDescription(type, sdp) {
@@ -74,23 +82,25 @@ test('withEpoch preserves WebIDL description/candidate fields on the prototype',
   assert.equal(withEpoch(null, 1), null);
 });
 
-test('transport state prefers direct, falls back after timeout, and re-probes with backoff', () => {
+test('transport state uses an available relay immediately and re-probes with backoff', () => {
   const sm = new TransportStateMachine({ fallbackMs: 1000, baseBackoffMs: 500, maxBackoffMs: 2000 });
   sm.reset(0);
   assert.equal(sm.state, TRANSPORT_STATE.CONNECTING);
 
-  // Inbound relay frames alone do not downgrade a connecting peer before timeout.
-  assert.equal(sm.noteRelayAvailable(100), null);
-  assert.equal(sm.state, TRANSPORT_STATE.CONNECTING);
-
-  assert.equal(sm.tick(999), null);
-  assert.equal(sm.tick(1000), 'use-relay');
+  // An inbound relay frame proves the fallback path works; do not wait for a
+  // timeout that would leave the peer stuck in "reconnecting" with no audio.
+  assert.equal(sm.noteRelayAvailable(100), 'use-relay');
   assert.equal(sm.state, TRANSPORT_STATE.RELAY);
   assert.equal(sm.canSendRelay, true);
 
+  // Repeated relay frames must not reschedule the direct probe on every chunk.
+  const nextAttemptAt = sm.nextAttemptAt;
+  assert.equal(sm.noteRelayAvailable(200), null);
+  assert.equal(sm.nextAttemptAt, nextAttemptAt);
+
   // First probe after 500 ms, then exponential backoff capped at 2000 ms.
-  assert.equal(sm.tick(1499), null);
-  assert.equal(sm.tick(1500), 'restart-ice');
+  assert.equal(sm.tick(599), null);
+  assert.equal(sm.tick(600), 'restart-ice');
   assert.equal(sm.state, TRANSPORT_STATE.CONNECTING);
 
   // With relay already available, a direct failure returns to relay.
