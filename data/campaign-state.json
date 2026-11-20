@@ -361,6 +361,17 @@
       "comprehendLanguages": false,
       "tongues": false,
       "forcedLanguage": null
+    },
+    {
+      "id": "jagatai",
+      "name": "Джагатай Кара-Буран",
+      "title": "Воїн Ехо / Сотник «Чорна Буря»",
+      "icon": "🐎",
+      "avatarColor": "#d97706",
+      "languages": ["common", "steppe_turs"],
+      "comprehendLanguages": false,
+      "tongues": false,
+      "forcedLanguage": null
     }
   ]
 }
