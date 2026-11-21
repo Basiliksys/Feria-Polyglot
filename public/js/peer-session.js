@@ -21,13 +21,24 @@
   const RELEVANT_PEER_FIELDS = [
     'clientId', 'characterId', 'role', 'displayName', 'title', 'icon', 'avatarColor',
     'understood', 'languageId', 'languageName', 'languageIcon', 'languageColor',
-    'isSpeaking', 'speakingLevel', 'mutedByWhisper', 'isWhisperToMe'
+    'scriptStyle', 'dspPreset', 'canReplyInLanguage',
+    'mutedByWhisper', 'isWhisperToMe'
   ];
+
+  function stableValue(value) {
+    if (value == null) return '';
+    if (Array.isArray(value)) return `[${value.map(stableValue).join(',')}]`;
+    if (typeof value === 'object') {
+      return `{${Object.keys(value).sort()
+        .map((key) => `${key}:${stableValue(value[key])}`).join(',')}}`;
+    }
+    return String(value);
+  }
 
   function peerSignature(peer) {
     if (!peer) return '';
     return RELEVANT_PEER_FIELDS
-      .map((field) => `${field}=${peer[field] == null ? '' : String(peer[field])}`)
+      .map((field) => `${field}=${stableValue(peer[field])}`)
       .join('|');
   }
 
@@ -64,9 +75,41 @@
   }
 
   function capIceQueue(queue, limit) {
-    const max = Math.max(1, Number(limit) || 64);
+    const parsed = Number(limit);
+    const max = Number.isFinite(parsed) ? Math.max(0, parsed) : 64;
     if (!Array.isArray(queue)) return [];
     return queue.length > max ? queue.slice(queue.length - max) : queue.slice();
+  }
+
+  /** Relay must stay armed until a direct connection is confirmed. */
+  function shouldSendRelay(connState) {
+    return connState !== 'connected';
+  }
+
+  /**
+   * Relay audio is a fallback only. Frames from unknown peers are stale, and
+   * frames received after a direct connection is confirmed would duplicate the
+   * WebRTC stream (audible echo/loop).
+   */
+  function shouldPlayRelay(peerId, peers, transports, directAttached) {
+    if (!peers || !peers.has(peerId)) return false;
+    // ontrack can precede the "connected" state; once a remote WebRTC track is
+    // attached, replaying relay audio would replace it with a delayed copy.
+    if (directAttached && directAttached.has(peerId)) return false;
+    const transport = transports && transports.get(peerId);
+    return !transport || transport.state !== TRANSPORT_STATE.DIRECT;
+  }
+
+  /**
+   * VAD runs every ~20 ms; sending every tick floods the server speaking bucket
+   * and inflates rejectedMessages. Only state changes and audible level moves
+   * are worth signalling, at most 10 times per second.
+   */
+  function shouldSendSpeakingUpdate(prev, isSpeaking, level, nowMs) {
+    if (!prev || isSpeaking !== prev.isSpeaking) return true;
+    if (!isSpeaking) return false;
+    if (nowMs - prev.at < 100) return false;
+    return Math.abs(level - prev.level) >= 0.05;
   }
 
   /** Attaches a session epoch to signaling payloads without losing WebIDL fields. */
@@ -98,6 +141,10 @@
       this.state = TRANSPORT_STATE.CONNECTING;
       this.relayAvailable = false;
       this.directAttempts = 0;
+      // True while an ICE restart is actually in flight. Inbound relay audio
+      // must not postpone that probe, otherwise continuous speech keeps the
+      // peer in relay forever.
+      this.probing = false;
       this.startedAt = nowMs;
       this.nextAttemptAt = Infinity;
     }
@@ -108,18 +155,26 @@
 
     noteDirectConnected(nowMs) {
       this.state = TRANSPORT_STATE.DIRECT;
+      this.probing = false;
       this.directAttempts = 0;
       this.nextAttemptAt = Infinity;
       this.lastDirectAt = nowMs;
     }
 
-    /** Inbound relay audio: availability only, never a downgrade by itself. */
+    /**
+     * Inbound relay audio proves a relay path exists. Switch to it immediately
+     * unless a healthy direct connection is established or an ICE probe is in
+     * flight — every PCM chunk arriving during a probe would otherwise reset
+     * the backoff and the peer would never leave relay.
+     */
     noteRelayAvailable(nowMs) {
       this.relayAvailable = true;
-      return this.tick(nowMs);
+      if (this.state === TRANSPORT_STATE.DIRECT || this.probing) return null;
+      return this.enterRelay(nowMs) ? 'use-relay' : null;
     }
 
     noteDirectFailure(nowMs) {
+      this.probing = false;
       if (this.relayAvailable) {
         this.enterRelay(nowMs);
       } else {
@@ -129,8 +184,11 @@
     }
 
     enterRelay(nowMs) {
+      if (this.state === TRANSPORT_STATE.RELAY) return false;
       this.state = TRANSPORT_STATE.RELAY;
+      this.probing = false;
       this.scheduleProbe(nowMs);
+      return true;
     }
 
     scheduleProbe(nowMs) {
@@ -148,12 +206,14 @@
       // the periodic tick does not immediately issue a duplicate ICE restart.
       this.scheduleProbe(nowMs);
       this.state = TRANSPORT_STATE.RECONNECTING;
+      this.probing = true;
       return 'restart-ice';
     }
 
     /** Returns an action to perform ('use-relay' | 'restart-ice') or null. */
     tick(nowMs) {
       if (this.state === TRANSPORT_STATE.CONNECTING && nowMs - this.startedAt >= this.fallbackMs) {
+        this.probing = false;
         if (this.relayAvailable) {
           this.enterRelay(nowMs);
           return 'use-relay';
@@ -162,12 +222,14 @@
         // leaving the peer stuck in "connecting" forever.
         this.scheduleProbe(nowMs);
         this.state = TRANSPORT_STATE.RECONNECTING;
+        this.probing = true;
         return 'restart-ice';
       }
       if ((this.state === TRANSPORT_STATE.RECONNECTING || this.state === TRANSPORT_STATE.RELAY) &&
           nowMs >= this.nextAttemptAt) {
         this.state = TRANSPORT_STATE.CONNECTING;
         this.startedAt = nowMs;
+        this.probing = true;
         return 'restart-ice';
       }
       return null;
@@ -242,6 +304,9 @@
     peerSignature,
     reconcilePeers,
     capIceQueue,
+    shouldSendRelay,
+    shouldPlayRelay,
+    shouldSendSpeakingUpdate,
     withEpoch,
     TransportStateMachine,
     PerfectNegotiator

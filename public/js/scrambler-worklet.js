@@ -27,9 +27,8 @@ class PolyglotScramblerProcessor extends AudioWorkletProcessor {
     this.writeIdx = 0;
     this.activeWritten = 0;
 
-    // Permutation offsets for distant syllable jumps
-    this.permOffsets = [0.35, 0.72, 0.18, 0.55, 0.85, 0.42];
-    this.permIdx = 0;
+    // Grain look-back is randomised per grain; a fixed offset cycle made the
+    // same syllable repeat audibly every few grains ("loop" artefact).
 
     // Two overlapping grains staggered by 50%
     this.grainA = { active: false, pos: 0, anchor: 0, len: 6720, rate: 1.0 };
@@ -94,27 +93,27 @@ class PolyglotScramblerProcessor extends AudioWorkletProcessor {
     const pScale = Math.max(0.72, Math.min(1.38, pitchRatio));
     this.targetF1 = pair[0] * pScale;
     this.targetF2 = pair[1] * pScale;
-    this.burstEnv = 1.0;
-    this.syllableCooldown = Math.round(0.085 * sampleRate);
+    // Keep a soft breathy onset instead of a bright click/knock. The old
+    // full-scale white-noise burst dominated low-pitched presets (Dwarvish,
+    // Infernal) and made every vowel sound like a percussion hit.
+    this.burstEnv = 0.4;
+    this.syllableCooldown = Math.round(0.12 * sampleRate);
   }
 
   resetGrain(grain, grainLen, pitchRatio) {
     grain.active = true;
     grain.pos = 0;
     grain.len = grainLen;
-    const jitter = 0.92 + this.nextRand() * 0.16;
+    const jitter = 0.88 + this.nextRand() * 0.24;
     grain.rate = Math.max(0.45, Math.min(1.9, pitchRatio * jitter));
 
     const neededBack = Math.ceil(grainLen * grain.rate) + 32;
     const maxAvail = Math.min(this.activeWritten, Math.round(sampleRate * 1.4));
-
-    let offsetBack = 16;
-    if (maxAvail > neededBack * 2) {
-      const permFrac = this.permOffsets[this.permIdx % this.permOffsets.length];
-      this.permIdx++;
-      const lookbackSpan = maxAvail - neededBack;
-      offsetBack = Math.max(16, Math.min(lookbackSpan, Math.floor(permFrac * lookbackSpan)));
-    }
+    const minBack = Math.min(neededBack, maxAvail);
+    const span = Math.max(1, maxAvail - minBack);
+    // Pick a fresh slice of recent speech for every grain instead of replaying
+    // the same anchor from a short fixed cycle.
+    const offsetBack = minBack + Math.floor(this.nextRand() * span);
 
     grain.anchor = (this.writeIdx - offsetBack + this.bufSize) % this.bufSize;
   }
@@ -233,9 +232,9 @@ class PolyglotScramblerProcessor extends AudioWorkletProcessor {
         let cons = 0;
         if (this.burstEnv > 0.005) {
           const white = this.nextRand() * 2 - 1;
-          this.consLp = this.consLp * 0.45 + white * 0.55;
-          cons = (white - this.consLp) * this.burstEnv * Math.min(0.4, this.fastEnv * 2.2);
-          this.burstEnv *= 0.9985;
+          this.consLp = this.consLp * 0.55 + white * 0.45;
+          cons = (white - this.consLp) * this.burstEnv * Math.min(0.16, this.fastEnv * 1.3);
+          this.burstEnv *= 0.9992;
         }
 
         // Full formant-morphed synthetic syllable driven by speaker cadence

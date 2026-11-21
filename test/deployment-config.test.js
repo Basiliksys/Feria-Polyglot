@@ -18,11 +18,15 @@ test('render.yaml declares one web instance, no disk, and the healthcheck', () =
   assert.match(blueprint, /^\s*-\s+type:\s*web\s*$/m);
   assert.match(blueprint, /^\s*name:\s*feria-polyglot\s*$/m);
   assert.match(blueprint, /^\s*runtime:\s*node\s*$/m);
-  assert.match(blueprint, /^\s*buildCommand:\s*npm ci\s*$/m);
+  assert.match(blueprint, /^\s*buildCommand:\s*npm ci && npm test\b/m, 'a red build must not deploy');
+  assert.doesNotMatch(blueprint, /^\s*preDeployCommand:/m, 'pre-deploy commands are paid-plan only');
   assert.match(blueprint, /^\s*startCommand:\s*npm start\s*$/m);
+  assert.match(blueprint, /^\s*autoDeployTrigger:\s*commit\s*$/m);
   assert.match(blueprint, /^\s*healthCheckPath:\s*\/api\/health\s*$/m);
   assert.match(blueprint, /^\s*numInstances:\s*1\s*$/m);
-  assert.match(blueprint, /^\s*maxShutdownDelaySeconds:\s*\d+(?:\s+#.*)?$/m);
+  assert.match(blueprint, /^\s*branch:\s*render-hardening\b/m, 'auto-deploy must not fall back to the old default branch');
+  assert.match(blueprint, /^\s*region:\s*frankfurt\s*$/m);
+  assert.doesNotMatch(blueprint, /^\s*maxShutdownDelaySeconds:/m, 'unsupported on free tier');
   assert.doesNotMatch(blueprint, /^\s*disk:/m, 'no persistent disk on Render');
   assert.doesNotMatch(blueprint, /^\s*type:\s*(worker|cron)\s*$/m, 'single-process deployment');
 });
@@ -65,6 +69,8 @@ test('README documents the deployable surface', () => {
 test('runtime state cache is ignored while the seed campaign state stays tracked', () => {
   const rules = gitignore.split(/\r?\n/).filter((line) => line.trim() && !line.trim().startsWith('#'));
   assert.ok(rules.includes('data/runtime-state.json'));
+  assert.ok(rules.includes('.env.*'), 'local env files must never be committed');
+  assert.ok(rules.includes('!.env.example'), 'a sanitised example may stay tracked');
   assert.ok(!rules.some((rule) => rule.includes('campaign-state.json')), 'seed must stay tracked');
   assert.ok(fs.existsSync(path.join(ROOT, 'data', 'campaign-state.json')), 'seed file exists');
 });

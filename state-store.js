@@ -2,6 +2,13 @@
 
 const fs = require('fs');
 const path = require('path');
+const {
+  LEGACY_DSP_PRESETS,
+  NATURAL_DSP_PRESETS,
+  presetEquals
+} = require('./dsp-presets');
+
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 
 // Rune / glyph alphabets per scriptStyle using widely supported Unicode characters
 const SCRIPT_ALPHABETS = {
@@ -99,7 +106,7 @@ function sanitizeGlyph(icon, id, fallback = '✦') {
   const str = String(icon || '').trim();
   if (!str || /\p{Extended_Pictographic}/u.test(str) || str.length > 8 ||
       /[<>&"'`{}[\]\\]/.test(str)) {
-    return DEFAULT_GLYPHS[id] || fallback;
+    return hasOwn(DEFAULT_GLYPHS, id) ? String(DEFAULT_GLYPHS[id]) : fallback;
   }
   return str;
 }
@@ -110,7 +117,10 @@ function safeText(value, fallback, max) {
 }
 
 function safeId(value) {
-  return typeof value === 'string' && ID_RE.test(value) ? value : null;
+  if (typeof value !== 'string' || !ID_RE.test(value)) return null;
+  // These strings are valid identifiers but dangerous as dynamic object keys.
+  if (value === '__proto__' || value === 'constructor' || value === 'toString') return null;
+  return value;
 }
 
 function safeColor(value, fallback) {
@@ -125,6 +135,18 @@ function normalizeDspPreset(preset) {
   }
   result.filterType = FILTER_TYPES.has(p.filterType) ? p.filterType : 'bandpass';
   return result;
+}
+
+/** Upgrades untouched built-in presets while preserving DM customisations. */
+function resolveDspPreset(id, preset) {
+  const normalized = normalizeDspPreset(preset);
+  const next = NATURAL_DSP_PRESETS[id];
+  if (!next) return normalized;
+  const legacy = LEGACY_DSP_PRESETS[id];
+  if (legacy && presetEquals(normalized, normalizeDspPreset(legacy))) {
+    return normalizeDspPreset(next);
+  }
+  return normalized;
 }
 
 /**
@@ -147,8 +169,8 @@ function normalizeState(raw) {
       category: CATEGORIES.has(lang.category) ? lang.category : 'feria',
       color: safeColor(lang.color, '#c084fc'),
       icon: sanitizeGlyph(lang.icon, id, '✦'),
-      scriptStyle: SCRIPT_ALPHABETS[lang.scriptStyle] ? lang.scriptStyle : 'ancient',
-      dspPreset: normalizeDspPreset(lang.dspPreset)
+      scriptStyle: hasOwn(SCRIPT_ALPHABETS, lang.scriptStyle) ? lang.scriptStyle : 'ancient',
+      dspPreset: resolveDspPreset(id, lang.dspPreset)
     });
   }
   if (!languageIds.has('common')) {
@@ -209,6 +231,10 @@ function normalizeState(raw) {
       translatedBy: msg.translatedBy ? safeText(msg.translatedBy, null, MAX_NAME) : null,
       isWhisper: msg.isWhisper === true,
       whisperTargetClientId: safeId(msg.whisperTargetClientId),
+      whisperTargetClientIds: [...new Set(
+        (Array.isArray(msg.whisperTargetClientIds) ? msg.whisperTargetClientIds.slice(0, 64) : [])
+          .map((id) => safeId(id)).filter(Boolean)
+      )],
       whisperTargetCharacterId: safeId(msg.whisperTargetCharacterId),
       whisperTargetName: msg.whisperTargetName ? safeText(msg.whisperTargetName, null, MAX_NAME) : null
     });
@@ -260,7 +286,10 @@ class CampaignStore {
           Authorization: `Bearer ${this.token}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify([command]),
+        // Upstash REST expects one flat command array per request, e.g.
+        // ["SET","key","value"]. A nested array is the pipeline format and
+        // returns HTTP 400 from the live API.
+        body: JSON.stringify(command),
         signal: controller.signal
       });
       if (!res.ok) throw new Error(`Upstash HTTP ${res.status}`);
@@ -278,6 +307,7 @@ class CampaignStore {
     if (!this.kvConfigured || !this.ownerId) return;
     try {
       await this.kvCommand(['SET', this.ownerKey, JSON.stringify({ id: this.ownerId, at: Date.now() })]);
+      if (this.lastSaveError?.startsWith('KV ownership claim failed')) this.lastSaveError = null;
     } catch (err) {
       this.lastSaveError = `KV ownership claim failed: ${err.message}`;
       this.logger.warn?.('[state] Upstash ownership claim failed:', err.message);
@@ -314,6 +344,7 @@ class CampaignStore {
       try {
         raw = await this.kvCommand(['GET', this.key]);
         this.lastSyncAt = new Date().toISOString();
+        if (this.lastSaveError?.startsWith('KV read failed')) this.lastSaveError = null;
       } catch (err) {
         this.lastSaveError = `KV read failed: ${err.message}`;
         this.fetchDisabledUntil = Date.now() + 30000;
@@ -324,6 +355,7 @@ class CampaignStore {
     if (typeof raw === 'string' && raw.trim()) {
       try {
         const state = normalizeState(JSON.parse(raw));
+        if (this.lastSaveError?.startsWith('KV payload invalid')) this.lastSaveError = null;
         this.writeLocalSync(raw);
         return state;
       } catch (err) {
@@ -365,6 +397,7 @@ class CampaignStore {
       } catch {}
       return null;
     }
+    if (this.lastSaveError?.startsWith('Local state invalid')) this.lastSaveError = null;
     return result;
   }
 
@@ -376,7 +409,7 @@ class CampaignStore {
   }
 
   writeLocalSync(raw) {
-    if (!this.dataPath) return;
+    if (!this.dataPath) return true;
     try {
       fs.mkdirSync(path.dirname(this.dataPath), { recursive: true });
       const tmp = `${this.dataPath}.tmp`;
@@ -384,9 +417,12 @@ class CampaignStore {
       const handle = fs.openSync(tmp, 'r+');
       try { fs.fsyncSync(handle); } finally { fs.closeSync(handle); }
       fs.renameSync(tmp, this.dataPath);
+      if (this.lastSaveError?.startsWith('Local write failed')) this.lastSaveError = null;
+      return true;
     } catch (err) {
       this.lastSaveError = `Local write failed: ${err.message}`;
       this.logger.error?.('[state] Local write failed:', err.message);
+      return false;
     }
   }
 
@@ -407,13 +443,14 @@ class CampaignStore {
       let raw;
       try {
         raw = JSON.stringify(this.snapshot());
+        if (this.lastSaveError?.startsWith('State serialize failed')) this.lastSaveError = null;
       } catch (err) {
         this.lastSaveError = `State serialize failed: ${err.message}`;
         this.logger.error?.('[state] State serialize failed:', err.message);
         return;
       }
 
-      this.writeLocalSync(raw);
+      const localOk = this.writeLocalSync(raw);
 
       if (this.kvConfigured) {
         // A previous deploy must never overwrite a newer instance's snapshot
@@ -423,10 +460,12 @@ class CampaignStore {
           this.fetchDisabledUntil = Date.now() + 30000;
           return;
         }
+        if (this.lastSaveError?.startsWith('KV ownership lost')) this.lastSaveError = null;
         try {
           await this.kvCommand(['SET', this.key, raw]);
           this.lastSyncAt = new Date().toISOString();
-          if (!this.lastSaveError?.startsWith('Local')) this.lastSaveError = null;
+          // Only clear the health error when both durable writes succeeded.
+          if (localOk) this.lastSaveError = null;
           this.fetchDisabledUntil = 0;
         } catch (err) {
           this.lastSaveError = `KV write failed: ${err.message}`;
@@ -479,6 +518,9 @@ module.exports = {
   safeColor,
   safeId,
   normalizeDspPreset,
+  resolveDspPreset,
+  NATURAL_DSP_PRESETS,
+  LEGACY_DSP_PRESETS,
   normalizeState,
   CampaignStore
 };

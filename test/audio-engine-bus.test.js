@@ -98,7 +98,36 @@ class FakeAudioContext {
     node.buffer = null;
     return node;
   }
-  createMediaStreamSource() { return new FakeNode(this, 'source'); }
+  createMediaStreamSource(stream) {
+    const node = new FakeNode(this, 'source');
+    node.stream = stream;
+    return node;
+  }
+  createMediaStreamDestination() {
+    const node = new FakeNode(this, 'mediaStreamDestination');
+    node.stream = { getAudioTracks: () => [{ enabled: true }] };
+    return node;
+  }
+  createDynamicsCompressor() {
+    const node = new FakeNode(this, 'compressor');
+    for (const key of ['threshold', 'knee', 'ratio', 'attack', 'release']) {
+      node[key] = new FakeParam(0);
+    }
+    return node;
+  }
+  createAnalyser() {
+    const node = new FakeNode(this, 'analyser');
+    node.fftSize = 512;
+    node.getFloatTimeDomainData = (array) => {
+      if (typeof this.testFrame === 'function') {
+        this.testFrame(array);
+        return;
+      }
+      const sample = this.testSample || 0;
+      for (let i = 0; i < array.length; i++) array[i] = sample;
+    };
+    return node;
+  }
   createBuffer(channels, length, rate) {
     const data = new Float32Array(length);
     return { getChannelData: () => data, duration: length / rate };
@@ -106,6 +135,11 @@ class FakeAudioContext {
   createBufferSource() {
     const node = new FakeNode(this, 'bufferSource');
     node.start = () => {};
+    node.stop = () => {
+      node.stopped = (node.stopped || 0) + 1;
+      if (node.onended) node.onended();
+    };
+    this.lastSource = node;
     return node;
   }
 }
@@ -120,7 +154,10 @@ function createEngine() {
   registry.keyFor = registryApi.keyFor;
   registry.presetSignature = registryApi.presetSignature;
   const sandbox = {
-    window: { AudioContext: FakeAudioContext },
+    window: {
+      AudioContext: FakeAudioContext,
+      RelayProtocol: { int16ToFloat32: (pcm) => Float32Array.from(pcm, (v) => v / 32768) }
+    },
     document: { createElement: () => ({ play: () => Promise.resolve(), srcObject: null }) },
     AudioWorkletNode: FakeAudioWorkletNode,
     DspBusRegistry: registry,
@@ -240,4 +277,158 @@ test('setNoiseGateThreshold updates every live bus', async () => {
     checked++;
   });
   assert.equal(checked, 2);
+});
+
+test('voice activity gates the outgoing stream and the self-monitor preview', async () => {
+  const engine = createEngine();
+  await engine.ensureInitialized();
+  engine.ctx.testSample = 0;
+  const rawStream = { getAudioTracks: () => [{ enabled: true }] };
+  const gatedStream = await engine.setLocalStream(rawStream);
+
+  try {
+    // Silence closes the gate after the first VAD tick.
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(engine.localGateOpen, false);
+    assert.equal(engine.localGateGain.gain.value, 0);
+
+    // Speech re-opens it; everything sent to WebRTC/relay sits after this gain.
+    engine.ctx.testSample = 0.08;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(engine.localGateOpen, true);
+    assert.equal(engine.localGateGain.gain.value, 1);
+
+    // Voice test must preview the gated stream, not the raw microphone.
+    await engine.enableSelfMonitor(true);
+    assert.equal(engine.selfMonitorChain.source.stream, gatedStream);
+
+    // The hold expires and the gate closes again in quiet passages.
+    engine.ctx.testSample = 0;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(engine.localGateOpen, false);
+    assert.equal(engine.localGateGain.gain.value, 0);
+  } finally {
+    await engine.enableSelfMonitor(false);
+    engine.teardownLocalPipeline();
+  }
+});
+
+test('switching to direct audio cancels queued relay playback', async () => {
+  const engine = createEngine();
+  await engine.ensureInitialized();
+  const peer = gibberishPeer('common');
+  await engine.playRelayedAudioChunk('p1', {
+    pcm: new Int16Array([0, 100, 0, -100]),
+    sampleRate: 24000
+  }, peer);
+
+  const chain = engine.peerChains.get('p1');
+  const source = engine.ctx.lastSource;
+  assert.equal(chain.relaySources.size, 1);
+  assert.equal(source.stopped, undefined);
+
+  engine.stopRelayPlayback('p1');
+  assert.equal(chain.relaySources.size, 0);
+  assert.equal(chain.nextRelayTime, 0);
+  assert.equal(source.stopped, 1, 'scheduled relay audio is stopped');
+});
+
+test('relay playback rechecks transport after async chain setup', async () => {
+  const engine = createEngine();
+  await engine.ensureInitialized();
+  let allowed = true;
+  engine.isRelayAllowed = () => allowed;
+  const original = engine.ensureRelayChain.bind(engine);
+  engine.ensureRelayChain = async (...args) => {
+    const chain = await original(...args);
+    // A direct WebRTC track arrived while the chain was being created.
+    allowed = false;
+    return chain;
+  };
+
+  await engine.playRelayedAudioChunk('p1', {
+    pcm: new Int16Array([0, 100, 0, -100]),
+    sampleRate: 24000
+  }, gibberishPeer('ancient'));
+
+  assert.equal(engine.ctx.lastSource, undefined, 'no relay source is scheduled after direct audio wins');
+  assert.equal(engine.peerChains.get('p1').relaySources.size, 0);
+});
+
+test('a stale peer attach cannot recreate a chain after cleanup', async () => {
+  const engine = createEngine();
+  await engine.ensureInitialized();
+  let current = true;
+  const resolvers = [];
+  engine.ensureInitialized = () => new Promise((resolve) => resolvers.push(resolve));
+
+  const attached = engine.attachPeerStream(
+    'p1',
+    { id: 'stale', getAudioTracks: () => [{ id: 'stale', enabled: true }] },
+    gibberishPeer('ancient'),
+    () => current
+  );
+  current = false; // cleanup ran while ensureInitialized was pending
+  resolvers[0]();
+
+  assert.equal(await attached, false);
+  assert.equal(engine.peerChains.has('p1'), false, 'no chain is built for a superseded peer connection');
+});
+
+test('the newest microphone switch wins when initialization overlaps', async () => {
+  const engine = createEngine();
+  await engine.ensureInitialized();
+  const realEnsureInitialized = engine.ensureInitialized.bind(engine);
+  const resolvers = [];
+  engine.ensureInitialized = () => new Promise((resolve) => resolvers.push(resolve));
+
+  const stream = (id) => ({
+    id,
+    getAudioTracks: () => [{ id, enabled: true }]
+  });
+  const first = engine.setLocalStream(stream('first'));
+  const second = engine.setLocalStream(stream('second'));
+  resolvers[0]();
+  resolvers[1]();
+  await Promise.all([first, second]);
+  engine.ensureInitialized = realEnsureInitialized;
+
+  try {
+    assert.equal(engine.rawLocalStream.id, 'second');
+    assert.equal(engine.localSource.stream.id, 'second');
+  } finally {
+    engine.teardownLocalPipeline();
+  }
+});
+
+test('short keyboard/mouse clicks do not open the noise gate', async () => {
+  const engine = createEngine();
+  await engine.ensureInitialized();
+  engine.ctx.testSample = 0.002;
+  const rawStream = { getAudioTracks: () => [{ enabled: true }] };
+  await engine.setLocalStream(rawStream);
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(engine.localGateOpen, false);
+
+    // A 2-sample impulse repeated every tick: high peak, very low average
+    // energy. Looks loud to a peak detector but is not speech.
+    engine.ctx.testFrame = (array) => {
+      array.fill(0.002);
+      array[0] = 0.9;
+      array[1] = -0.9;
+    };
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(engine.localGateOpen, false, 'transients are rejected');
+    assert.equal(engine.aboveGateFrames, 0);
+
+    // Sustained voiced audio still opens the gate promptly.
+    engine.ctx.testFrame = (array) => array.fill(0.08);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(engine.localGateOpen, true);
+  } finally {
+    engine.ctx.testFrame = null;
+    engine.teardownLocalPipeline();
+  }
 });

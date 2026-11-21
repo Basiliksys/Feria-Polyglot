@@ -32,14 +32,14 @@ async function startFakeKv() {
     req.on('data', (chunk) => { body += chunk; });
     req.on('end', () => {
       try {
-        const [command] = JSON.parse(body);
+        const command = JSON.parse(body);
         const [name, key, value] = command;
         res.setHeader('content-type', 'application/json');
         if (name === 'GET') {
-          res.end(JSON.stringify([{ result: kv.has(key) ? kv.get(key) : null }]));
+          res.end(JSON.stringify({ result: kv.has(key) ? kv.get(key) : null }));
         } else if (name === 'SET') {
           kv.set(key, value);
-          res.end(JSON.stringify([{ result: 'OK' }]));
+          res.end(JSON.stringify({ result: 'OK' }));
         } else {
           res.statusCode = 400;
           res.end(JSON.stringify([{ error: 'unsupported' }]));
@@ -125,10 +125,12 @@ async function waitUntil(predicate, timeout = 4000, label = 'condition') {
   throw new Error(`Timeout waiting for ${label}`);
 }
 
-async function waitForFlush(port) {
+async function waitForFlush(port, after = null) {
   for (let i = 0; i < 100; i++) {
     const health = await fetch(`http://127.0.0.1:${port}/api/health`).then((r) => r.json());
-    if (health.pendingSaves === 0 && health.lastSaveAt) return health;
+    // lastSaveAt from an earlier write is not enough: the debounce timer may
+    // not have fired for the mutation we are waiting on yet.
+    if (health.pendingSaves === 0 && health.lastSaveAt && health.lastSaveAt !== after) return health;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error('State was never flushed');
@@ -247,9 +249,12 @@ test('Render-style server: projection, whispers, validation and restart persiste
 
   // 6. State survives a full process restart via Upstash.
   dm.clear();
+  const beforeSave = await fetch(`http://127.0.0.1:${port}/api/health`)
+    .then((r) => r.json())
+    .then((h) => h.lastSaveAt);
   dm.send({ type: 'CHAT_MESSAGE', text: 'ПЕРЕВІРКА-ЗБЕРЕЖЕННЯ', languageId: 'common' });
   await dm.waitFor('CHAT_MESSAGE_NEW');
-  await waitForFlush(port);
+  await waitForFlush(port, beforeSave);
   assert.ok(kv.keys.has(env.STATE_KEY));
 
   await stopServer(server);

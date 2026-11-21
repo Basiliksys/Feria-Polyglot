@@ -7,6 +7,10 @@ const {
   TRANSPORT_STATE,
   reconcilePeers,
   capIceQueue,
+  shouldSendRelay,
+  shouldPlayRelay,
+  shouldSendSpeakingUpdate,
+  peerSignature,
   withEpoch,
   TransportStateMachine,
   PerfectNegotiator
@@ -49,11 +53,75 @@ test('reconcilePeers ignores unknown fields and treats null snapshots as empty',
   assert.deepEqual(reconcilePeers([a], null).removed, ['a']);
 });
 
+test('peerSignature tracks DSP/script changes but ignores object key order', () => {
+  const a = peer('a', {
+    scriptStyle: 'runic',
+    dspPreset: { pitchRatio: 0.9, grainSizeMs: 140 },
+    canReplyInLanguage: true
+  });
+  const reordered = peer('a', {
+    scriptStyle: 'runic',
+    dspPreset: { grainSizeMs: 140, pitchRatio: 0.9 },
+    canReplyInLanguage: true
+  });
+  assert.equal(peerSignature(a), peerSignature(reordered));
+  assert.notEqual(
+    peerSignature(a),
+    peerSignature(peer('a', { ...a, scriptStyle: 'elvish' })),
+    'scriptStyle changes must refresh the peer audio bus'
+  );
+  assert.notEqual(
+    peerSignature(a),
+    peerSignature(peer('a', { ...a, dspPreset: { pitchRatio: 1.2, grainSizeMs: 140 } }))
+  );
+  assert.notEqual(
+    peerSignature(a),
+    peerSignature(peer('a', { ...a, canReplyInLanguage: false }))
+  );
+});
+
 test('capIceQueue keeps only the newest candidates', () => {
   assert.deepEqual(capIceQueue([1, 2, 3, 4, 5], 3), [3, 4, 5]);
   assert.deepEqual(capIceQueue([1, 2], 5), [1, 2]);
   assert.deepEqual(capIceQueue(null, 5), []);
-  assert.deepEqual(capIceQueue([1, 2, 3], 0), [1, 2, 3]);
+  assert.deepEqual(capIceQueue([1, 2, 3], 0), [], 'an explicit zero means no buffering');
+  assert.equal(capIceQueue(Array.from({ length: 100 }, (_, i) => i)).length, 64,
+    'the default keeps the newest 64 candidates');
+});
+
+test('relay stays armed until a direct connection is confirmed', () => {
+  for (const state of ['connecting', 'reconnecting', 'relay', 'failed']) {
+    assert.equal(shouldSendRelay(state), true, `${state} still needs the relay tap`);
+  }
+  assert.equal(shouldSendRelay('connected'), false);
+});
+
+test('inbound relay audio stops once direct audio is confirmed', () => {
+  const peers = new Map([['a', peer('a')]]);
+  const transports = new Map([['a', { state: TRANSPORT_STATE.CONNECTING }]]);
+
+  assert.equal(shouldPlayRelay('a', peers, transports), true);
+  assert.equal(shouldPlayRelay('old-peer', peers, transports), false, 'stale frames are dropped');
+
+  transports.get('a').state = TRANSPORT_STATE.RELAY;
+  assert.equal(shouldPlayRelay('a', peers, transports), true);
+  transports.get('a').state = TRANSPORT_STATE.DIRECT;
+  assert.equal(shouldPlayRelay('a', peers, transports), false, 'no duplicate audio after connect');
+
+  transports.get('a').state = TRANSPORT_STATE.CONNECTING;
+  assert.equal(shouldPlayRelay('a', peers, transports), true);
+  const attached = new Set(['a']);
+  assert.equal(shouldPlayRelay('a', peers, transports, attached), false,
+    'ontrack alone already provides direct audio');
+});
+
+test('speaking updates are throttled instead of sent on every VAD tick', () => {
+  assert.equal(shouldSendSpeakingUpdate(null, false, 0, 0), true, 'initial state is sent');
+  const sent = { at: 1000, isSpeaking: true, level: 0.3 };
+  assert.equal(shouldSendSpeakingUpdate(sent, true, 0.31, 1020), false, 'same state is suppressed');
+  assert.equal(shouldSendSpeakingUpdate(sent, true, 0.31, 1100), false, 'tiny level change is ignored');
+  assert.equal(shouldSendSpeakingUpdate(sent, true, 0.5, 1100), true, 'audible level change is sent');
+  assert.equal(shouldSendSpeakingUpdate(sent, false, 0, 1010), true, 'silence change is immediate');
 });
 
 test('withEpoch preserves WebIDL description/candidate fields on the prototype', () => {
@@ -74,26 +142,43 @@ test('withEpoch preserves WebIDL description/candidate fields on the prototype',
   assert.equal(withEpoch(null, 1), null);
 });
 
-test('transport state prefers direct, falls back after timeout, and re-probes with backoff', () => {
+test('transport state uses an available relay immediately and re-probes with backoff', () => {
   const sm = new TransportStateMachine({ fallbackMs: 1000, baseBackoffMs: 500, maxBackoffMs: 2000 });
   sm.reset(0);
   assert.equal(sm.state, TRANSPORT_STATE.CONNECTING);
 
-  // Inbound relay frames alone do not downgrade a connecting peer before timeout.
-  assert.equal(sm.noteRelayAvailable(100), null);
-  assert.equal(sm.state, TRANSPORT_STATE.CONNECTING);
-
-  assert.equal(sm.tick(999), null);
-  assert.equal(sm.tick(1000), 'use-relay');
+  // An inbound relay frame proves the fallback path works; do not wait for a
+  // timeout that would leave the peer stuck in "reconnecting" with no audio.
+  assert.equal(sm.noteRelayAvailable(100), 'use-relay');
   assert.equal(sm.state, TRANSPORT_STATE.RELAY);
   assert.equal(sm.canSendRelay, true);
 
+  // Repeated relay frames must not reschedule the direct probe on every chunk.
+  const nextAttemptAt = sm.nextAttemptAt;
+  assert.equal(sm.noteRelayAvailable(200), null);
+  assert.equal(sm.nextAttemptAt, nextAttemptAt);
+
   // First probe after 500 ms, then exponential backoff capped at 2000 ms.
-  assert.equal(sm.tick(1499), null);
-  assert.equal(sm.tick(1500), 'restart-ice');
+  assert.equal(sm.tick(599), null);
+  assert.equal(sm.tick(600), 'restart-ice');
+  assert.equal(sm.state, TRANSPORT_STATE.CONNECTING);
+  assert.equal(sm.probing, true);
+
+  // Continuous relay speech during the probe must not postpone it forever.
+  const probeStartedAt = sm.nextAttemptAt;
+  assert.equal(sm.noteRelayAvailable(700), null);
+  assert.equal(sm.nextAttemptAt, probeStartedAt);
   assert.equal(sm.state, TRANSPORT_STATE.CONNECTING);
 
-  // With relay already available, a direct failure returns to relay.
+  // The probe keeps its 1 s window; only then does relay take over again and
+  // schedule the next, exponentially later attempt.
+  assert.equal(sm.tick(1599), null);
+  assert.equal(sm.tick(1600), 'use-relay');
+  assert.equal(sm.state, TRANSPORT_STATE.RELAY);
+  assert.equal(sm.probing, false);
+  assert.equal(sm.nextAttemptAt, 2600);
+
+  // With relay already available, a direct failure stays in relay.
   sm.noteDirectFailure(1600);
   assert.equal(sm.state, TRANSPORT_STATE.RELAY);
   assert.equal(sm.tick(2599), null);

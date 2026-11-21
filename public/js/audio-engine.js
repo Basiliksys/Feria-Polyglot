@@ -28,12 +28,16 @@ class PolyglotAudioEngine {
     this.localVadTimer = null;
     this.localGateOpen = false;
     this.gateHoldUntil = 0;
+    this.noiseFloor = 0.0015;
+    this.aboveGateFrames = 0;
 
     // Relay capture node (AudioWorklet tap, replaces ScriptProcessorNode)
     this.relayTap = null;
     this.relayTargetsCount = 0;
     this.onAudioRelayChunk = null;
+    this.isRelayAllowed = () => true; // overridden by app.js with transport state
     this.relaySequence = 0;
+    this.localStreamGeneration = 0;
 
     this.atmosphericEnabled = true;
     this.dmHearAsGibberish = false;
@@ -239,7 +243,7 @@ class PolyglotAudioEngine {
     try { bus.chorusLfo.stop(); } catch {}
     for (const node of [
       bus.inputNode, bus.outputNode, bus.scrambler, bus.filter, bus.chorusDelay,
-      bus.chorusLfoGain, bus.chorusWetGain, bus.convolver, bus.reverbWetGain,
+      bus.chorusLfo, bus.chorusLfoGain, bus.chorusWetGain, bus.convolver, bus.reverbWetGain,
       bus.dryGain, bus.processedGain
     ]) {
       try { node.disconnect(); } catch {}
@@ -294,7 +298,10 @@ class PolyglotAudioEngine {
       userVolume: 1.0,
       userMuted: false,
       whisperMuted: false,
-      nextRelayTime: 0
+      nextRelayTime: 0,
+      // Scheduled relay buffers must be cancellable when direct audio takes
+      // over, otherwise the same phrase is heard twice (echo / "loop").
+      relaySources: new Set()
     };
 
     this.applyChainState(chain, initialMode, initialPreset);
@@ -345,8 +352,12 @@ class PolyglotAudioEngine {
     return this.atmosphericEnabled ? 'ATMOSPHERIC' : 'CLEAN';
   }
 
-  async attachPeerStream(clientId, stream, peerState) {
+  async attachPeerStream(clientId, stream, peerState, isCurrent = () => true) {
+    // The caller may tear down the peer connection while initialization is
+    // pending. Never create a fresh chain for a stale ontrack callback.
+    if (!isCurrent()) return false;
     await this.ensureInitialized();
+    if (!isCurrent()) return false;
     const prevChain = this.peerChains.get(clientId);
     const storedPref = this.peerAudioPrefs.get(clientId);
     const prevVol = storedPref?.volume ?? prevChain?.userVolume ?? 1.0;
@@ -370,6 +381,7 @@ class PolyglotAudioEngine {
     chain.whisperMuted = !!peerState?.mutedByWhisper;
     this.syncChainOutputGain(chain);
     this.peerChains.set(clientId, chain);
+    return true;
   }
 
   async ensureRelayChain(clientId, peerState) {
@@ -391,11 +403,15 @@ class PolyglotAudioEngine {
 
   async playRelayedAudioChunk(clientId, frame, peerState) {
     if (peerState?.mutedByWhisper) return;
+    if (!this.isRelayAllowed(clientId)) return;
     const chain = await this.ensureRelayChain(clientId, peerState);
+    // A direct WebRTC track may have arrived while ensureInitialized/chain setup
+    // was pending. Recheck before creating any audio source.
+    if (!this.isRelayAllowed(clientId)) return;
     if (this.ctx?.state === 'suspended') {
       try { await this.ctx.resume(); } catch {}
     }
-    if (chain.userMuted || chain.whisperMuted) return;
+    if (!this.isRelayAllowed(clientId) || chain.userMuted || chain.whisperMuted) return;
 
     const int16 = frame.pcm;
     if (!int16 || int16.length === 0) return;
@@ -420,8 +436,27 @@ class PolyglotAudioEngine {
     const src = this.ctx.createBufferSource();
     src.buffer = audioBuf;
     src.connect(chain.inputNode);
+    const forget = () => {
+      chain.relaySources.delete(src);
+      try { src.disconnect(); } catch {}
+    };
+    src.onended = forget;
+    chain.relaySources.add(src);
     src.start(chain.nextRelayTime);
     chain.nextRelayTime += audioBuf.duration;
+  }
+
+  /** Cancels queued relay audio for a peer that switched to direct WebRTC. */
+  stopRelayPlayback(clientId) {
+    const chain = this.peerChains.get(clientId);
+    if (!chain) return;
+    chain.nextRelayTime = 0;
+    for (const src of [...chain.relaySources]) {
+      src.onended = null;
+      try { src.stop(); } catch {}
+      try { src.disconnect(); } catch {}
+    }
+    chain.relaySources.clear();
   }
 
   updatePeerLanguage(clientId, peerState) {
@@ -468,6 +503,11 @@ class PolyglotAudioEngine {
 
   destroyChain(chain) {
     this.releaseChainBus(chain);
+    for (const src of [...(chain.relaySources || [])]) {
+      src.onended = null;
+      try { src.stop(); } catch {}
+    }
+    chain.relaySources?.clear();
     try {
       chain.source?.disconnect();
       chain.inputNode.disconnect();
@@ -485,8 +525,11 @@ class PolyglotAudioEngine {
    * room noise / keyboard clicks are completely silenced when the user isn't speaking.
    */
   async setLocalStream(rawStream) {
-    this.rawLocalStream = rawStream;
+    const generation = ++this.localStreamGeneration;
     await this.ensureInitialized();
+    // A second microphone switch may have started while the audio context was
+    // loading; let the newest call win instead of building two pipelines.
+    if (generation !== this.localStreamGeneration) return this.gatedLocalStream;
 
     if (this.localVadTimer) {
       clearInterval(this.localVadTimer);
@@ -496,6 +539,7 @@ class PolyglotAudioEngine {
     this.teardownLocalPipeline();
 
     if (!rawStream) {
+      this.rawLocalStream = null;
       if (this.selfMonitorChain) {
         this.destroyChain(this.selfMonitorChain);
         this.selfMonitorChain = null;
@@ -503,6 +547,7 @@ class PolyglotAudioEngine {
       return null;
     }
 
+    this.rawLocalStream = rawStream;
     const ctx = this.ctx;
     this.localSource = ctx.createMediaStreamSource(rawStream);
 
@@ -528,10 +573,17 @@ class PolyglotAudioEngine {
     this.localMicActive = !!(initialTrack && initialTrack.enabled);
     this.localGateGain = ctx.createGain();
     this.localGateGain.gain.value = this.localMicActive ? 1.0 : 0.0;
+    // Keep the cached VAD state in sync with the initial gain, otherwise the
+    // first quiet tick sees "already closed" and never actually mutes it.
+    this.localGateOpen = this.localMicActive;
 
     this.localDest = ctx.createMediaStreamDestination();
     this.localAnalyser = ctx.createAnalyser();
-    this.localAnalyser.fftSize = 512;
+    // ~43 ms at 48 kHz instead of ~10 ms: enough context to tell a sustained
+    // syllable from a 5 ms keyboard/mouse impulse.
+    this.localAnalyser.fftSize = 2048;
+    this.noiseFloor = 0.0015;
+    this.aboveGateFrames = 0;
 
     this.localSource.connect(this.localHpFilter);
     this.localHpFilter.connect(this.localLpFilter);
@@ -582,7 +634,7 @@ class PolyglotAudioEngine {
 
       if (!this.localMicActive) {
         this.localMicActive = true;
-        this.localGateGain?.gain.setTargetAtTime(1.0, ctx.currentTime, 0.01);
+        this.localGateGain?.gain.setTargetAtTime(this.localGateOpen ? 1.0 : 0.0, ctx.currentTime, 0.01);
       }
 
       this.localAnalyser.getFloatTimeDomainData(data);
@@ -595,18 +647,47 @@ class PolyglotAudioEngine {
         if (av > peak) peak = av;
       }
       const rms = Math.sqrt(sum / data.length);
+      const crest = peak / Math.max(rms, 1e-6);
       const level = Math.min(1, rms * 8);
       const now = Date.now();
 
-      // Track speech activity for UI indicator without attenuating outgoing voice
-      if (rms >= this.noiseGateThreshold || peak >= this.noiseGateThreshold * 1.8) {
-        this.gateHoldUntil = now + 420;
-        this.lastSpeakingAt = now;
+      // Discord-like gating: learn the quietest recent level, use hysteresis
+      // around it, and reject short broadband impulses. Browser noise
+      // suppression handles steady hiss; this removes the clicks it misses.
+      if (rms < this.noiseFloor) {
+        this.noiseFloor = this.noiseFloor * 0.85 + rms * 0.15;
+      } else if (!this.localGateOpen) {
+        this.noiseFloor = Math.min(rms, this.noiseFloor * 1.002);
+      }
+      const openThreshold = Math.max(this.noiseGateThreshold, this.noiseFloor * 3);
+      const closeThreshold = Math.max(this.noiseGateThreshold * 0.55, this.noiseFloor * 1.7);
+      const isTransient = crest > 12 || (peak > openThreshold * 8 && rms < openThreshold);
+      const above = rms >= openThreshold && !isTransient;
+
+      if (above) {
+        this.aboveGateFrames++;
+        // A single strong frame can be speech; a weak one must persist for two
+        // ticks (~40 ms) so one keyboard click cannot open the gate.
+        if (this.aboveGateFrames >= 2 || rms >= openThreshold * 2.5) {
+          this.gateHoldUntil = now + 420;
+          this.lastSpeakingAt = now;
+        }
+      } else {
+        this.aboveGateFrames = 0;
+        if (this.localGateOpen && rms >= closeThreshold && !isTransient) {
+          this.gateHoldUntil = now + 420;
+          this.lastSpeakingAt = now;
+        }
       }
 
       const gateOpenNow = now < this.gateHoldUntil;
       if (gateOpenNow !== this.localGateOpen) {
         this.localGateOpen = gateOpenNow;
+        this.localGateGain?.gain.setTargetAtTime(
+          gateOpenNow ? 1.0 : 0.0,
+          ctx.currentTime,
+          gateOpenNow ? 0.008 : 0.09
+        );
       }
 
       const isSpeaking = gateOpenNow || (now - this.lastSpeakingAt < 350);
@@ -619,11 +700,16 @@ class PolyglotAudioEngine {
     if (this.selfMonitorEnabled) {
       await this.enableSelfMonitor(true);
     }
+    if (generation !== this.localStreamGeneration) return this.gatedLocalStream;
 
     return this.gatedLocalStream;
   }
 
   teardownLocalPipeline() {
+    if (this.localVadTimer) {
+      clearInterval(this.localVadTimer);
+      this.localVadTimer = null;
+    }
     try { this.relayTap?.port.postMessage({ enabled: false }); } catch {}
     try { this.relayTap?.disconnect(); } catch {}
     try { this.silentMonitorGain?.disconnect(); } catch {}
@@ -644,6 +730,10 @@ class PolyglotAudioEngine {
     this.localDest = null;
     this.localAnalyser = null;
     this.gatedLocalStream = null;
+    this.localGateOpen = false;
+    this.gateHoldUntil = 0;
+    this.noiseFloor = 0.0015;
+    this.aboveGateFrames = 0;
   }
 
   setRelayTargetsCount(count) {
@@ -655,7 +745,8 @@ class PolyglotAudioEngine {
 
   setNoiseGateThreshold(threshold) {
     const parsed = Number(threshold);
-    this.noiseGateThreshold = Math.max(0.0002, Math.min(0.15, Number.isFinite(parsed) ? parsed : 0.0012));
+    // Match the AudioWorklet parameter's minValue so the UI slider is honest.
+    this.noiseGateThreshold = Math.max(0.001, Math.min(0.15, Number.isFinite(parsed) ? parsed : 0.0012));
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     this.buses.forEach((bus) => {
@@ -698,9 +789,13 @@ class PolyglotAudioEngine {
       this.destroyChain(this.selfMonitorChain);
     }
 
+    // Preview the same voice the other players will hear: take the tap after
+    // the VAD gate, not the raw microphone, so "Тест голосу" respects the same
+    // noise gate in both gibberish and atmospheric modes.
+    const monitoredStream = this.gatedLocalStream || this.rawLocalStream;
     const mode = this.resolveSelfMonitorMode();
     const preset = this.resolveSelfMonitorPreset();
-    this.selfMonitorChain = this.createProcessingChain(this.rawLocalStream, mode, preset);
+    this.selfMonitorChain = this.createProcessingChain(monitoredStream, mode, preset);
   }
 
   setSelfMonitorMode(mode) {

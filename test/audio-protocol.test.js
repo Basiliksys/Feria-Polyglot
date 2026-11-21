@@ -14,7 +14,8 @@ const {
   decodeRelayFrame,
   int16ToFloat32,
   float32ToInt16,
-  RelayPcmEncoder
+  RelayPcmEncoder,
+  chunkRelayTargets
 } = protocol;
 
 const SENDER = '11111111-2222-3333-4444-555555555555';
@@ -113,6 +114,46 @@ test('RelayPcmEncoder downsamples 48kHz to 24kHz in fixed 20ms chunks', () => {
   // 4 seconds at 24kHz = 96,000 samples = 200 chunks of 480.
   assert.equal(totalSamples, 96000);
   assert.equal(emitted, 200);
+});
+
+test('chunkRelayTargets sends every PCM chunk to every target', () => {
+  const ids = Array.from({ length: MAX_RELAY_TARGETS * 2 + 1 }, (_, i) => `p${i}`);
+  const batches = chunkRelayTargets(ids);
+  assert.equal(batches.length, 3);
+  assert.deepEqual(batches.flat(), ids, 'each target appears exactly once per PCM chunk');
+  for (const batch of batches) {
+    assert.ok(batch.length <= MAX_RELAY_TARGETS);
+    assert.equal(new Set(batch).size, batch.length, 'no duplicate target in a frame');
+  }
+  assert.deepEqual(chunkRelayTargets(ids.slice(0, 3)), [ids.slice(0, 3)]);
+  assert.deepEqual(chunkRelayTargets(null), []);
+  assert.deepEqual(chunkRelayTargets(ids, 0), [], 'a zero cap sends nobody');
+  assert.deepEqual(chunkRelayTargets([...ids, 'p0']).flat(), ids, 'duplicate ids are dropped');
+});
+
+test('RelayPcmEncoder treats an explicit zero gate threshold as always-on', () => {
+  const encoder = new RelayPcmEncoder({
+    inputRate: 48000,
+    outputRate: 24000,
+    chunkSamples: 240,
+    gateThreshold: 0,
+    holdMs: 0
+  });
+  assert.equal(encoder.gateThreshold, 0);
+  assert.ok(encoder.push(new Float32Array(480).fill(0), 0).length > 0);
+});
+
+test('RelayPcmEncoder does not let a trailing click reopen earlier silence', () => {
+  const encoder = new RelayPcmEncoder({
+    inputRate: 48000,
+    outputRate: 24000,
+    chunkSamples: 240,
+    gateThreshold: 0.05,
+    holdMs: 0
+  });
+  const block = new Float32Array(4800);
+  block[4799] = 0.9; // one click in the last output sample of a 10-chunk block
+  assert.equal(encoder.push(block, 0).length, 0);
 });
 
 test('RelayPcmEncoder gates silence and keeps transmitting during the hold window', () => {
