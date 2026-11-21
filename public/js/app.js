@@ -48,7 +48,8 @@
     peerConnTimers: new Map(), // clientId -> timeout id (unused legacy hook)
     pendingIceCandidates: new Map(), // clientId -> RTCIceCandidateInit[]
     relayTargetIds: new Set(),
-    directAudioPeers: new Set(), // peers whose WebRTC track is already attached
+    directAudioPeers: new Set(), // peers with confirmed connected WebRTC ICE/transport
+    remoteTrackPeers: new Set(), // peers whose remote WebRTC MediaStream track attached
     relaySequence: 0,
     pendingIceRestart: new Set(), // peerIds waiting for a stable signaling state
     serverBuildId: null, // changes when a new deploy takes over
@@ -342,8 +343,9 @@
         try {
           const frame = RelayProtocol.decodeRelayFrame(event.data);
           const peerState = state.peers.get(frame.senderId);
-          if (!shouldPlayRelay(frame.senderId)) return;
+          if (!peerState) return;
           noteRelayFrame(frame.senderId);
+          if (!shouldPlayRelay(frame.senderId)) return;
           await audioEngine.playRelayedAudioChunk(frame.senderId, frame, peerState);
         } catch (err) {
           console.warn('Dropped malformed relay frame:', err.message);
@@ -497,8 +499,9 @@
       case 'AUDIO_RELAY_CHUNK': {
         // Legacy base64 form, kept so an older server deployment still works.
         const peerState = state.peers.get(msg.fromClientId);
-        if (!shouldPlayRelay(msg.fromClientId)) break;
+        if (!peerState) break;
         noteRelayFrame(msg.fromClientId);
+        if (!shouldPlayRelay(msg.fromClientId)) break;
         const binary = atob(msg.pcmBase64);
         const bytes = new Uint8Array(binary.length);
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
@@ -857,12 +860,20 @@
     let transport = state.transports.get(peerId);
     if (!transport) {
       transport = new window.PeerSession.TransportStateMachine({
-        fallbackMs: 12000, baseBackoffMs: 1000, maxBackoffMs: 30000
+        fallbackMs: 5000, baseBackoffMs: 1000, maxBackoffMs: 30000
       });
       transport.reset(Date.now());
       state.transports.set(peerId, transport);
     }
     return transport;
+  }
+
+  function isPcConnected(pc) {
+    return Boolean(
+      pc && (pc.connectionState === 'connected' ||
+        pc.iceConnectionState === 'connected' ||
+        pc.iceConnectionState === 'completed')
+    );
   }
 
   function noteRelayFrame(peerId) {
@@ -948,6 +959,7 @@
     state.pendingIceCandidates.clear();
     state.relayTargetIds.clear();
     state.directAudioPeers.clear();
+    state.remoteTrackPeers.clear();
     state.pendingIceRestart.clear();
     state.transports.clear();
     state.negotiators.clear();
@@ -976,7 +988,7 @@
     cleanupPeerConnection(peerId, { keepTransport: true });
     const transport = getTransport(peerId);
     // A recreated PC for the same peer must keep its relay/backoff history;
-    // otherwise repeated ICE restarts restart the 12s probe window forever.
+    // otherwise repeated ICE restarts restart the fallback probe window forever.
     if (!reuseTransport) transport.reset(Date.now());
     setPeerConnState(peerId, 'connecting');
 
@@ -987,8 +999,6 @@
       state.peerConnections.get(peerId) === pc &&
       pc.signalingState !== 'closed';
 
-    // Ensure /api/rtc-config (TURN + STUN) has resolved before creating the PC.
-    await rtcConfigPromise;
     let pc;
     try {
       pc = new RTCPeerConnection(ICE_CONFIG);
@@ -1016,10 +1026,16 @@
       if (!isCurrent(pc)) return;
       const cState = pc.connectionState;
       const iState = pc.iceConnectionState;
-      if (cState === 'connected' || iState === 'connected' || iState === 'completed') {
+      if (isPcConnected(pc)) {
+        audioEngine.stopRelayPlayback(peerId);
+        state.directAudioPeers.add(peerId);
         transport.noteDirectConnected(Date.now());
         setPeerConnState(peerId, 'connected');
       } else if (cState === 'failed' || iState === 'failed' || cState === 'disconnected' || cState === 'closed') {
+        state.directAudioPeers.delete(peerId);
+        if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+          transport.relayAvailable = true;
+        }
         transport.noteDirectFailure(Date.now());
         setPeerConnState(peerId, transport.canSendRelay ? 'relay' : 'reconnecting');
       }
@@ -1047,28 +1063,34 @@
     pc.ontrack = async (event) => {
       if (!isCurrent(pc)) return;
       const stream = event.streams[0] || new MediaStream([event.track]);
-      // Mark direct audio synchronously: a relay chunk already inside
-      // playRelayedAudioChunk must not resume and overwrite this stream.
-      audioEngine.stopRelayPlayback(peerId);
-      state.directAudioPeers.add(peerId);
       try {
         const attached = await audioEngine.attachPeerStream(
           peerId, stream, state.peers.get(peerId), () => isCurrent(pc)
         );
-        if (!attached) {
-          state.directAudioPeers.delete(peerId);
-          return;
-        }
+        if (!attached) return;
       } catch (err) {
-        if (state.pcGenerations.get(peerId) === generation) state.directAudioPeers.delete(peerId);
+        if (state.pcGenerations.get(peerId) === generation) {
+          state.remoteTrackPeers.delete(peerId);
+          state.directAudioPeers.delete(peerId);
+        }
         console.warn('[webrtc] attach stream failed:', peerId, err.message);
         return;
       }
       if (!isCurrent(pc)) {
         // A cleanup during the await already detached this stream. Do not let a
         // stale continuation re-add the marker for a newer peer connection.
-        if (state.pcGenerations.get(peerId) === generation) state.directAudioPeers.delete(peerId);
+        if (state.pcGenerations.get(peerId) === generation) {
+          state.remoteTrackPeers.delete(peerId);
+          state.directAudioPeers.delete(peerId);
+        }
         return;
+      }
+      state.remoteTrackPeers.add(peerId);
+      // Only silence relay once ICE/transport actually connected; ontrack fires
+      // as soon as SDP is applied even when ICE never establishes a direct path.
+      if (isPcConnected(pc)) {
+        audioEngine.stopRelayPlayback(peerId);
+        state.directAudioPeers.add(peerId);
       }
       const pref = getPeerAudioPref(state.peers.get(peerId));
       audioEngine.setPeerVolume(peerId, pref.volume);
@@ -1135,11 +1157,14 @@
     state.pendingIceRestart.delete(peerId);
     state.relayTargetIds.delete(peerId);
     state.directAudioPeers.delete(peerId);
+    state.remoteTrackPeers.delete(peerId);
     state.negotiators.delete(peerId);
-    if (!options.keepTransport) state.transports.delete(peerId);
+    if (!options.keepTransport) {
+      state.transports.delete(peerId);
+      audioEngine.detachPeerStream(peerId);
+    }
     state.pcGenerations.set(peerId, (state.pcGenerations.get(peerId) || 0) + 1);
     audioEngine.setRelayTargetsCount(state.relayTargetIds.size);
-    audioEngine.detachPeerStream(peerId);
 
     const pc = state.peerConnections.get(peerId);
     if (pc) {
@@ -1155,6 +1180,7 @@
   }
 
   async function restartIce(peerId) {
+    state.directAudioPeers.delete(peerId);
     const pc = state.peerConnections.get(peerId);
     if (pc && pc.signalingState !== 'closed') {
       state.pendingIceRestart.add(peerId);
@@ -1196,6 +1222,9 @@
         getNegotiator(peerId).onNegotiationNeeded(pendingPc).then((sent) => {
           if (sent) state.pendingIceRestart.delete(peerId);
         }).catch(() => {});
+      }
+      if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+        transport.relayAvailable = true;
       }
       const action = transport.tick(now);
       if (action === 'use-relay') {
@@ -2149,6 +2178,12 @@
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
   }
+
+  document.addEventListener('click', () => {
+    if (audioEngine.ctx?.state === 'suspended') {
+      audioEngine.ctx.resume().catch(() => {});
+    }
+  }, { passive: true });
 
   // Boot
   loadLobby();

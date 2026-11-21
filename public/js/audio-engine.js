@@ -357,11 +357,17 @@ class PolyglotAudioEngine {
     // pending. Never create a fresh chain for a stale ontrack callback.
     if (!isCurrent()) return false;
     await this.ensureInitialized();
+    if (this.ctx?.state === 'suspended') {
+      try { await this.ctx.resume(); } catch {}
+    }
     if (!isCurrent()) return false;
     const prevChain = this.peerChains.get(clientId);
     const storedPref = this.peerAudioPrefs.get(clientId);
     const prevVol = storedPref?.volume ?? prevChain?.userVolume ?? 1.0;
     const prevMuted = storedPref?.muted ?? prevChain?.userMuted ?? false;
+    const preservedRelaySources = prevChain?.relaySources?.size ? [...prevChain.relaySources] : [];
+    const preservedNextRelayTime = prevChain?.nextRelayTime || 0;
+    if (prevChain?.relaySources) prevChain.relaySources.clear();
 
     this.detachPeerStream(clientId);
 
@@ -379,6 +385,18 @@ class PolyglotAudioEngine {
     chain.userVolume = prevVol;
     chain.userMuted = prevMuted;
     chain.whisperMuted = !!peerState?.mutedByWhisper;
+    chain.nextRelayTime = preservedNextRelayTime;
+    for (const src of preservedRelaySources) {
+      try {
+        src.disconnect();
+        src.connect(chain.inputNode);
+        src.onended = () => {
+          chain.relaySources.delete(src);
+          try { src.disconnect(); } catch {}
+        };
+        chain.relaySources.add(src);
+      } catch {}
+    }
     this.syncChainOutputGain(chain);
     this.peerChains.set(clientId, chain);
     return true;
@@ -423,13 +441,12 @@ class PolyglotAudioEngine {
     chData.set(floatData);
 
     const now = this.ctx.currentTime;
-    const hasGap = chain.nextRelayTime < now || chain.nextRelayTime > now + 0.35;
+    const hasGap = chain.nextRelayTime < now || chain.nextRelayTime > now + 0.6;
     if (hasGap) {
-      chain.nextRelayTime = now + 0.03;
-      const fadeLen = Math.min(24, Math.floor(chData.length / 2));
+      chain.nextRelayTime = now + 0.065;
+      const fadeLen = Math.min(24, chData.length);
       for (let i = 0; i < fadeLen; i++) {
         chData[i] *= i / fadeLen;
-        chData[chData.length - 1 - i] *= i / fadeLen;
       }
     }
 
@@ -657,7 +674,7 @@ class PolyglotAudioEngine {
       if (rms < this.noiseFloor) {
         this.noiseFloor = this.noiseFloor * 0.85 + rms * 0.15;
       } else if (!this.localGateOpen) {
-        this.noiseFloor = Math.min(rms, this.noiseFloor * 1.002);
+        this.noiseFloor = Math.min(0.0045, rms, this.noiseFloor * 1.002);
       }
       const openThreshold = Math.max(this.noiseGateThreshold, this.noiseFloor * 3);
       const closeThreshold = Math.max(this.noiseGateThreshold * 0.55, this.noiseFloor * 1.7);
