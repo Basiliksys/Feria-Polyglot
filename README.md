@@ -76,6 +76,7 @@ Render без платної persistent disk перезаписує файлов
 | `UPSTASH_REDIS_REST_TOKEN` | так (для Render) | Токен REST-ендпоінту. Секрет, не потрапляє в логи. |
 | `STATE_KEY` | ні | Ключ Redis для стану партії. |
 | `STATE_DIR` / `STATE_PATH` | ні | Шлях локального кешу. У режимі Upstash за замовчуванням `data/runtime-state.json` (seed-файл у репозиторії не перезаписується); без Upstash — `data/campaign-state.json`. |
+| `CF_TURN_KEY_ID` / `CF_TURN_API_TOKEN` | ні | Автоматична генерація й кешування (на 6 годин) тимчасових креденціалів Cloudflare Realtime TURN (1 ТБ/міс безкоштовно). Має пріоритет над дефолтним OpenRelay, але перекривається явним `TURN_URL`/`TURN_URLS`. |
 | `TURN_URL` / `TURN_URLS` | ні | Comma-separated TURN-адреси для прямого WebRTC. Без значення використовується `staticauth.openrelay.metered.ca` (порти 80/443, UDP/TCP/TLS). |
 | `TURN_USERNAME` / `TURN_CREDENTIAL` | ні | Явні креденціали TURN. Для браузера вони все одно видимі в `/api/rtc-config`, тож рекомендується власний TURN із короткоживучими токенами. Якщо задати тільки `TURN_URL` без цих змінних, сервер не підставляє порожній auth — TURN має бути без авторизації. |
 | `TURN_SHARED_SECRET` | ні | Секрет coturn static-auth для дефолтного OpenRelay; сервер генерує username `expiry:feria` і HMAC-SHA1 credential на 6 годин. |

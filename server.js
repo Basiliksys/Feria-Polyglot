@@ -547,6 +547,68 @@ function parseIceUrls(value, fallback) {
     .slice(0, 16);
 }
 
+const CF_TURN_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const CF_TURN_TTL_SEC = 86400;
+const cfTurnCache = { iceServers: null, expiresAt: 0, inFlight: null };
+
+function normalizeCloudflareIceServers(raw) {
+  const list = Array.isArray(raw) ? raw : (raw && typeof raw === 'object' ? [raw] : []);
+  return list
+    .filter((entry) => entry && typeof entry === 'object' && entry.urls &&
+      (typeof entry.urls === 'string' || (Array.isArray(entry.urls) && entry.urls.length > 0)))
+    .map((entry) => {
+      const out = { urls: entry.urls };
+      if (typeof entry.username === 'string' && entry.username) out.username = entry.username;
+      if (typeof entry.credential === 'string' && entry.credential) out.credential = entry.credential;
+      return out;
+    });
+}
+
+async function fetchCloudflareTurnServers(keyId, apiToken) {
+  const now = Date.now();
+  if (cfTurnCache.iceServers && now < cfTurnCache.expiresAt) {
+    return cfTurnCache.iceServers;
+  }
+  if (cfTurnCache.inFlight) {
+    return cfTurnCache.inFlight;
+  }
+
+  const baseUrl = String(process.env.CF_TURN_API_URL || 'https://rtc.live.cloudflare.com/v1/turn/keys').replace(/\/+$/, '');
+  const endpoint = `${baseUrl}/${encodeURIComponent(keyId)}/credentials/generate-ice-servers`;
+
+  cfTurnCache.inFlight = (async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ ttl: CF_TURN_TTL_SEC }),
+        signal: controller.signal
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const servers = normalizeCloudflareIceServers(data?.iceServers);
+      if (!servers.length) {
+        throw new Error('Empty iceServers in Cloudflare response');
+      }
+      cfTurnCache.iceServers = servers;
+      cfTurnCache.expiresAt = Date.now() + CF_TURN_CACHE_TTL_MS;
+      return servers;
+    } finally {
+      clearTimeout(timeout);
+      cfTurnCache.inFlight = null;
+    }
+  })();
+
+  return cfTurnCache.inFlight;
+}
+
 function buildRtcConfig() {
   const stunUrls = parseIceUrls(process.env.STUN_URLS, DEFAULT_STUN_URLS.join(','));
   const customTurn = process.env.TURN_URL || process.env.TURN_URLS;
@@ -565,6 +627,34 @@ function buildRtcConfig() {
     iceServers.push({ urls: turnUrls, ...auth });
   }
   return { iceServers };
+}
+
+async function resolveRtcConfig() {
+  const customTurn = process.env.TURN_URL || process.env.TURN_URLS;
+  if (customTurn) {
+    return buildRtcConfig();
+  }
+
+  const cfKeyId = String(process.env.CF_TURN_KEY_ID || process.env.CLOUDFLARE_TURN_KEY_ID || '').trim();
+  const cfToken = String(process.env.CF_TURN_API_TOKEN || process.env.CLOUDFLARE_TURN_API_TOKEN || '').trim();
+  if (!cfKeyId || !cfToken) {
+    return buildRtcConfig();
+  }
+
+  const stunUrls = parseIceUrls(process.env.STUN_URLS, DEFAULT_STUN_URLS.join(','));
+  try {
+    const cfServers = await fetchCloudflareTurnServers(cfKeyId, cfToken);
+    const presentUrls = new Set();
+    for (const entry of cfServers) {
+      const urls = Array.isArray(entry.urls) ? entry.urls : [entry.urls];
+      for (const u of urls) presentUrls.add(u);
+    }
+    const extraStun = stunUrls.filter((u) => !presentUrls.has(u)).map((urls) => ({ urls }));
+    return { iceServers: [...extraStun, ...cfServers] };
+  } catch (err) {
+    console.warn('[rtc-config] Cloudflare TURN fetch failed:', err.message);
+    return buildRtcConfig();
+  }
 }
 
 const app = express();
@@ -591,8 +681,13 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
-app.get('/api/rtc-config', (_req, res) => {
-  res.json(buildRtcConfig());
+app.get('/api/rtc-config', async (_req, res) => {
+  try {
+    res.json(await resolveRtcConfig());
+  } catch (err) {
+    console.warn('[rtc-config] unexpected error:', err.message);
+    res.json(buildRtcConfig());
+  }
 });
 
 app.post('/api/export-state', (req, res) => {

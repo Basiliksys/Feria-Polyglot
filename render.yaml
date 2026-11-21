@@ -30,3 +30,7 @@ services:
         sync: false
       - key: STATE_KEY
         value: feria:campaign-state
+      - key: CF_TURN_KEY_ID
+        sync: false
+      - key: CF_TURN_API_TOKEN
+        sync: false

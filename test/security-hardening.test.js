@@ -275,6 +275,69 @@ test('default TURN uses short-lived static-auth credentials', { timeout: 30000 }
   );
 });
 
+test('rtc config fetches and caches Cloudflare TURN credentials when CF_TURN_KEY_ID and CF_TURN_API_TOKEN are set', { timeout: 30000 }, async (t) => {
+  let requests = 0;
+  let capturedAuth = '';
+  let capturedPath = '';
+  let capturedBody = '';
+  const cfMock = http.createServer((req, res) => {
+    requests++;
+    capturedAuth = req.headers.authorization || '';
+    capturedPath = req.url || '';
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      capturedBody = body;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({
+        iceServers: {
+          urls: [
+            'stun:stun.cloudflare.com:3478',
+            'turn:turn.cloudflare.com:3478?transport=udp',
+            'turns:turn.cloudflare.com:5349?transport=tcp'
+          ],
+          username: 'cf-user',
+          credential: 'cf-pass'
+        }
+      }));
+    });
+  });
+  cfMock.listen(0, '127.0.0.1');
+  await once(cfMock, 'listening');
+
+  const cfPort = cfMock.address().port;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feria-rtc-cf-'));
+  const port = await freePort();
+  const server = await startServer(localEnv(port, dir, {
+    TURN_URL: '', TURN_URLS: '', TURN_USERNAME: '', TURN_CREDENTIAL: '',
+    CF_TURN_KEY_ID: 'cf-key-123',
+    CF_TURN_API_TOKEN: 'cf-secret-token',
+    CF_TURN_API_URL: `http://127.0.0.1:${cfPort}/v1/turn/keys`
+  }));
+  t.after(async () => {
+    await stopServer(server);
+    await new Promise((resolve) => cfMock.close(resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const firstRes = await fetch(`http://127.0.0.1:${port}/api/rtc-config`);
+  assert.equal(firstRes.status, 200);
+  const firstConfig = await firstRes.json();
+  const cfTurn = firstConfig.iceServers.find((entry) => String(entry.urls).includes('turn.cloudflare.com'));
+  assert.ok(cfTurn, 'Cloudflare TURN server entry must be present');
+  assert.equal(cfTurn.username, 'cf-user');
+  assert.equal(cfTurn.credential, 'cf-pass');
+  assert.equal(capturedAuth, 'Bearer cf-secret-token');
+  assert.equal(capturedPath, '/v1/turn/keys/cf-key-123/credentials/generate-ice-servers');
+  assert.deepEqual(JSON.parse(capturedBody), { ttl: 86400 });
+
+  const secondRes = await fetch(`http://127.0.0.1:${port}/api/rtc-config`);
+  assert.equal(secondRes.status, 200);
+  const secondConfig = await secondRes.json();
+  assert.equal(secondConfig.iceServers.find((e) => String(e.urls).includes('turn.cloudflare.com')).username, 'cf-user');
+  assert.equal(requests, 1, 'Cloudflare TURN credentials must be cached across requests');
+});
+
 test('every API response forbids caching', { timeout: 30000 }, async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feria-api-cache-'));
   const port = await freePort();
