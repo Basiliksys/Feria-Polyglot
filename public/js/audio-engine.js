@@ -97,6 +97,15 @@ class PolyglotAudioEngine {
         }
       };
     }
+    if (!this.wakeLockRequested &&
+        typeof navigator !== 'undefined' &&
+        navigator.locks &&
+        typeof navigator.locks.request === 'function') {
+      this.wakeLockRequested = true;
+      try {
+        navigator.locks.request('feria-polyglot-audio-active', () => new Promise(() => {})).catch(() => {});
+      } catch {}
+    }
     if (!this.keepAliveDest &&
         typeof this.ctx.createMediaStreamDestination === 'function' &&
         typeof document !== 'undefined' &&
@@ -104,17 +113,25 @@ class PolyglotAudioEngine {
       try {
         const dest = this.ctx.createMediaStreamDestination();
         const gain = this.ctx.createGain();
-        gain.gain.value = 0;
+        // Micro-level infrasonic pilot (18 Hz at -69 dBFS) stops Chromium/Edge
+        // SilentSinkSuspender (AreFramesZero) from suspending the background sink.
+        gain.gain.value = 0.00035;
         const osc = this.ctx.createOscillator();
-        osc.frequency.value = 1;
+        osc.frequency.value = 18;
         osc.connect(gain);
         gain.connect(dest);
+        gain.connect(this.ctx.destination);
         osc.start();
 
         const el = document.createElement('audio');
         el.srcObject = dest.stream;
         el.muted = false;
         el.playsInline = true;
+        el.hidden = true;
+        if (el.style) el.style.display = 'none';
+        if (document.body && typeof document.body.appendChild === 'function') {
+          document.body.appendChild(el);
+        }
         el.play().catch(() => {});
 
         this.keepAliveDest = dest;
@@ -133,6 +150,14 @@ class PolyglotAudioEngine {
     for (const chain of this.peerChains.values()) {
       if (chain.audioEl && chain.audioEl.paused) {
         chain.audioEl.play().catch(() => {});
+      }
+    }
+    if (typeof document !== 'undefined' && document.hidden === true && this.ctx) {
+      const track = this.rawLocalStream?.getAudioTracks?.()?.[0];
+      if (track && track.enabled) {
+        this.localGateOpen = true;
+        this.gateHoldUntil = Date.now() + 60000;
+        this.localGateGain?.gain.setTargetAtTime(1.0, this.ctx.currentTime, 0.008);
       }
     }
   }
@@ -424,11 +449,16 @@ class PolyglotAudioEngine {
 
     this.detachPeerStream(clientId);
 
-    // Muted hidden <audio> element forces Chromium to pump remote WebRTC MediaStream frames
+    // Muted hidden <audio> element forces Chromium/Edge to pump remote WebRTC frames
     const audioEl = document.createElement('audio');
     audioEl.srcObject = stream;
     audioEl.muted = true;
     audioEl.playsInline = true;
+    audioEl.hidden = true;
+    if (audioEl.style) audioEl.style.display = 'none';
+    if (typeof document !== 'undefined' && document.body && typeof document.body.appendChild === 'function') {
+      document.body.appendChild(audioEl);
+    }
     audioEl.play().catch(() => {});
 
     const mode = this.resolveModeForPeer(peerState);
@@ -591,6 +621,7 @@ class PolyglotAudioEngine {
     } catch {}
     if (chain.audioEl) {
       chain.audioEl.srcObject = null;
+      chain.audioEl.remove?.();
     }
   }
 

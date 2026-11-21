@@ -2192,6 +2192,9 @@
   window.addEventListener('focus', () => {
     audioEngine.ensureRunning?.();
   });
+  window.addEventListener('blur', () => {
+    audioEngine.ensureRunning?.();
+  });
 
   // Boot
   loadLobby();
