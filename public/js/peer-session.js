@@ -206,7 +206,7 @@
       // the periodic tick does not immediately issue a duplicate ICE restart.
       this.scheduleProbe(nowMs);
       this.state = TRANSPORT_STATE.RECONNECTING;
-      this.probing = true;
+      this.probing = false;
       return 'restart-ice';
     }
 
@@ -219,10 +219,10 @@
           return 'use-relay';
         }
         // No direct connection and no relay path yet: retry ICE rather than
-        // leaving the peer stuck in "connecting" forever.
+        // leaving the peer stuck in "connecting" forever, without blocking
+        // immediate relay takeover if audio arrives while waiting.
         this.scheduleProbe(nowMs);
         this.state = TRANSPORT_STATE.RECONNECTING;
-        this.probing = true;
         return 'restart-ice';
       }
       if ((this.state === TRANSPORT_STATE.RECONNECTING || this.state === TRANSPORT_STATE.RELAY) &&
@@ -272,6 +272,9 @@
         this.isSettingRemoteAnswerPending = true;
         try {
           await pc.setRemoteDescription(description);
+          // Accepting the remote answer resolves our offer (including after glare),
+          // so subsequent ICE candidates from this peer belong to the active session.
+          this.ignoreOffer = false;
           return true;
         } finally {
           this.isSettingRemoteAnswerPending = false;

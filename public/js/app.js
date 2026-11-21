@@ -773,10 +773,7 @@
     $('noiseGateSlider').value = String(clamped);
     $('noiseGateLabel').textContent = `${clamped}%`;
     $('micGateMarker').style.left = `${clamped}%`;
-    // The meter shows level = min(1, rms * 8). Put the marker at the same
-    // RMS value it points to: 15% sets the OPEN threshold to ~0.019 RMS; the
-    // adaptive close threshold sits below that. The worklet clamps at 0.001.
-    const threshold = Math.max(0.001, Math.min(0.15, clamped / 800));
+    const threshold = clamped === 0 ? 0.0005 : 0.0005 + Math.pow(clamped / 100, 1.4) * 0.025;
     audioEngine.setNoiseGateThreshold(threshold);
     try { localStorage.setItem(LS_KEYS.NOISE_GATE, String(clamped)); } catch {}
   }
@@ -990,6 +987,8 @@
       state.peerConnections.get(peerId) === pc &&
       pc.signalingState !== 'closed';
 
+    // Ensure /api/rtc-config (TURN + STUN) has resolved before creating the PC.
+    await rtcConfigPromise;
     let pc;
     try {
       pc = new RTCPeerConnection(ICE_CONFIG);

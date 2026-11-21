@@ -201,6 +201,9 @@ test('transport state restarts ICE when neither direct nor relay becomes availab
   assert.equal(sm.tick(999), null);
   assert.equal(sm.tick(1000), 'restart-ice');
   assert.equal(sm.state, TRANSPORT_STATE.RECONNECTING);
+  assert.equal(sm.probing, false);
+  assert.equal(sm.noteRelayAvailable(1100), 'use-relay');
+  assert.equal(sm.state, TRANSPORT_STATE.RELAY);
 });
 
 test('transport state does not downgrade a healthy direct connection', () => {
@@ -286,6 +289,12 @@ test('glare: impolite peer ignores colliding offer, polite peer rolls back and a
   assert.equal(pcB.rollbacks, 1);
   assert.equal(pcB.remoteDescription.sdp, 'theirs');
   assert.equal(sent.at(-1).type, 'answer');
+
+  // Accepting the polite peer's answer after glare must clear ignoreOffer so
+  // subsequent ICE candidates from the polite peer are not dropped.
+  assert.equal(await impolite.onRemoteDescription(pcA, { type: 'answer', sdp: 'polite-answer' }), true);
+  assert.equal(impolite.ignoreOffer, false);
+  assert.equal(impolite.shouldAcceptCandidate(), true);
 
   // Answer with no pending offer is ignored.
   const stale = new FakePc('stable');
