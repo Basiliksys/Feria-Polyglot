@@ -149,6 +149,7 @@ async function waitUntil(predicate, timeout = 5000, label = 'condition') {
 
 function localEnv(port, dir, extra = {}) {
   return {
+    NODE_ENV: 'test',
     PORT: String(port),
     HOST: '127.0.0.1',
     STATE_DIR: dir,
