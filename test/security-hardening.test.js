@@ -154,6 +154,11 @@ function localEnv(port, dir, extra = {}) {
     HOST: '127.0.0.1',
     STATE_DIR: dir,
     FERIA_DM_PIN: PIN,
+    CF_TURN_KEY_ID: '',
+    CF_TURN_API_TOKEN: '',
+    CLOUDFLARE_TURN_KEY_ID: '',
+    CLOUDFLARE_TURN_API_TOKEN: '',
+    CF_TURN_API_URL: '',
     ...extra
   };
 }
