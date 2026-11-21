@@ -13,6 +13,8 @@ class PolyglotAudioEngine {
     this.peerAudioPrefs = new Map(); // clientId -> { volume, muted } (survives chain replacement)
     this.buses = new DspBusRegistry((payload) => this.createDspBus(payload.mode, payload.preset));
     this.selfMonitorChain = null;
+    this.keepAliveAudioEl = null;
+    this.keepAliveDest = null;
 
     this.rawLocalStream = null;
     this.gatedLocalStream = null;
@@ -81,6 +83,57 @@ class PolyglotAudioEngine {
     }
     if (!this.reverbBuffer) {
       this.reverbBuffer = this.createImpulseResponse(1.5, 3.4);
+    }
+    this.ensureKeepAliveAudio();
+  }
+
+  ensureKeepAliveAudio() {
+    if (!this.ctx) return;
+    if (!this.ctx._polyglotStateHooked) {
+      this.ctx._polyglotStateHooked = true;
+      this.ctx.onstatechange = () => {
+        if (this.ctx && this.ctx.state !== 'running') {
+          this.ctx.resume().catch(() => {});
+        }
+      };
+    }
+    if (!this.keepAliveDest &&
+        typeof this.ctx.createMediaStreamDestination === 'function' &&
+        typeof document !== 'undefined' &&
+        typeof document.createElement === 'function') {
+      try {
+        const dest = this.ctx.createMediaStreamDestination();
+        const gain = this.ctx.createGain();
+        gain.gain.value = 0;
+        const osc = this.ctx.createOscillator();
+        osc.frequency.value = 1;
+        osc.connect(gain);
+        gain.connect(dest);
+        osc.start();
+
+        const el = document.createElement('audio');
+        el.srcObject = dest.stream;
+        el.muted = false;
+        el.playsInline = true;
+        el.play().catch(() => {});
+
+        this.keepAliveDest = dest;
+        this.keepAliveAudioEl = el;
+      } catch {}
+    }
+  }
+
+  ensureRunning() {
+    if (this.ctx && this.ctx.state !== 'running') {
+      this.ctx.resume().catch(() => {});
+    }
+    if (this.keepAliveAudioEl && this.keepAliveAudioEl.paused) {
+      this.keepAliveAudioEl.play().catch(() => {});
+    }
+    for (const chain of this.peerChains.values()) {
+      if (chain.audioEl && chain.audioEl.paused) {
+        chain.audioEl.play().catch(() => {});
+      }
     }
   }
 
@@ -441,7 +494,11 @@ class PolyglotAudioEngine {
     chData.set(floatData);
 
     const now = this.ctx.currentTime;
-    const hasGap = chain.nextRelayTime < now || chain.nextRelayTime > now + 0.6;
+    const isFarAhead = chain.nextRelayTime > now + 2.5;
+    const hasGap = chain.nextRelayTime < now || isFarAhead;
+    if (isFarAhead) {
+      this.stopRelayPlayback(clientId);
+    }
     if (hasGap) {
       chain.nextRelayTime = now + 0.065;
       const fadeLen = Math.min(24, chData.length);
@@ -632,8 +689,12 @@ class PolyglotAudioEngine {
     this.gatedLocalStream = this.localDest.stream;
 
     const data = new Float32Array(this.localAnalyser.fftSize);
+    let lastVadTickAt = Date.now();
     this.localVadTimer = setInterval(() => {
       if (!this.localAnalyser) return;
+      const now = Date.now();
+      const tickDelta = now - lastVadTickAt;
+      lastVadTickAt = now;
       const track = this.rawLocalStream?.getAudioTracks()[0];
       const muted = !track || !track.enabled;
       if (muted) {
@@ -666,7 +727,6 @@ class PolyglotAudioEngine {
       const rms = Math.sqrt(sum / data.length);
       const crest = peak / Math.max(rms, 1e-6);
       const level = Math.min(1, rms * 8);
-      const now = Date.now();
 
       // Discord-like gating: learn the quietest recent level, use hysteresis
       // around it, and reject short broadband impulses. Browser noise
@@ -695,6 +755,13 @@ class PolyglotAudioEngine {
           this.gateHoldUntil = now + 420;
           this.lastSpeakingAt = now;
         }
+      }
+
+      // Browsers throttle setInterval in background tabs to >= 1000 ms (longer than the
+      // 420 ms hold window), which would close localGateGain and mute the speaker.
+      const isBackgrounded = (typeof document !== 'undefined' && document.hidden === true) || tickDelta > 150;
+      if (isBackgrounded) {
+        this.gateHoldUntil = Math.max(this.gateHoldUntil, now + 2500);
       }
 
       const gateOpenNow = now < this.gateHoldUntil;

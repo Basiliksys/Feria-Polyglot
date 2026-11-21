@@ -554,6 +554,7 @@
           peer.speakingLevel = msg.speakingLevel;
           updatePeerSpeakingDom(peer);
           if (peer.isSpeaking) {
+            audioEngine.ensureRunning?.();
             checkReplyPromptForPeer(peer);
           } else {
             state.replyPromptDismissed.delete(msg.clientId);
@@ -860,7 +861,7 @@
     let transport = state.transports.get(peerId);
     if (!transport) {
       transport = new window.PeerSession.TransportStateMachine({
-        fallbackMs: 5000, baseBackoffMs: 1000, maxBackoffMs: 30000
+        fallbackMs: 5000, baseBackoffMs: 6000, maxBackoffMs: 30000
       });
       transport.reset(Date.now());
       state.transports.set(peerId, transport);
@@ -1213,6 +1214,7 @@
   // Periodic transport ticks recover direct audio after a relay fallback.
   setInterval(() => {
     if (!state.clientId) return;
+    audioEngine.ensureRunning?.();
     const now = Date.now();
     for (const [peerId, transport] of state.transports) {
       if (!state.peers.has(peerId)) continue;
@@ -2184,6 +2186,12 @@
       audioEngine.ctx.resume().catch(() => {});
     }
   }, { passive: true });
+  document.addEventListener('visibilitychange', () => {
+    audioEngine.ensureRunning?.();
+  });
+  window.addEventListener('focus', () => {
+    audioEngine.ensureRunning?.();
+  });
 
   // Boot
   loadLobby();
