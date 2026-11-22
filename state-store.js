@@ -119,7 +119,12 @@ function safeText(value, fallback, max) {
 function safeId(value) {
   if (typeof value !== 'string' || !ID_RE.test(value)) return null;
   // These strings are valid identifiers but dangerous as dynamic object keys.
-  if (value === '__proto__' || value === 'constructor' || value === 'toString') return null;
+  const DANGEROUS_KEYS = new Set([
+    '__proto__', 'constructor', 'toString', 'hasOwnProperty',
+    'isPrototypeOf', 'propertyIsEnumerable', '__defineGetter__',
+    '__defineSetter__', '__lookupGetter__', '__lookupSetter__'
+  ]);
+  if (DANGEROUS_KEYS.has(value)) return null;
   return value;
 }
 
@@ -241,7 +246,7 @@ function normalizeState(raw) {
   }
 
   return {
-    dmPin: safeText(source.dmPin, '1250', MAX_PIN),
+    dmPin: safeText(source.dmPin, null, MAX_PIN),
     languages,
     characters,
     messages

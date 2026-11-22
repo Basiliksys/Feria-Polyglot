@@ -76,7 +76,8 @@
     activeHandoutMsgId: null,
     isBuilderPreviewing: false,
     builderPreviewPrevious: null, // self-monitor state before "Test voice"
-    languageSelectionPending: null // optimistic active-language choice awaiting server confirmation
+    languageSelectionPending: null, // optimistic active-language choice awaiting server confirmation
+    confirmedLanguageId: 'common' // last languageId confirmed by SELF_LANGUAGE_UPDATED
   };
 
   // Lets the audio engine re-check transport state after its own async work;
@@ -511,6 +512,7 @@
 
       case 'SELF_LANGUAGE_UPDATED':
         state.activeLanguageId = msg.languageId;
+        state.confirmedLanguageId = msg.languageId;
         state.replyPromptDismissed.clear();
         clearReplyPrompt();
         state.languageSelectionPending = null;
@@ -622,9 +624,10 @@
       case 'ERROR':
         if (state.languageSelectionPending &&
             msg.error === 'Ваш персонаж не може говорити цією мовою.') {
-          // The server rejected the optimistic choice; undo it so the user can
-          // retry (otherwise the early return would swallow every retry).
-          state.activeLanguageId = state.languageSelectionPending.previousId;
+          // The server rejected the optimistic choice. Roll back to the last
+          // server-confirmed language, not to the previous optimistic choice
+          // (which may itself have been rejected).
+          state.activeLanguageId = state.confirmedLanguageId;
           state.languageSelectionPending = null;
           renderLanguagePanel();
           renderPeersGrid();
@@ -1238,6 +1241,7 @@
     const previousId = state.activeLanguageId;
     state.languageSelectionPending = { languageId, previousId };
     wsSend({ type: 'ACTIVE_LANGUAGE_CHANGE', languageId });
+    // Optimistic UI update only; confirmedLanguageId is updated by the server.
     state.activeLanguageId = languageId;
     if (state.replyPromptLang && state.replyPromptLang.languageId === languageId) {
       $('replyPromptBanner').classList.add('hidden');

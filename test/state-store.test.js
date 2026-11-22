@@ -41,7 +41,7 @@ function fakeFetch(kv) {
 
 test('normalizeState always provides a usable common language', () => {
   const state = normalizeState(null);
-  assert.equal(state.dmPin, '1250');
+  assert.equal(state.dmPin, null);
   assert.deepEqual(state.languages, [DEFAULT_COMMON_LANGUAGE]);
   assert.deepEqual(state.characters, []);
   assert.deepEqual(state.messages, []);

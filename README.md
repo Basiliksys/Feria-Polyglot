@@ -112,7 +112,7 @@ Render без платної persistent disk перезаписує файлов
 
 ```bash
 npm ci
-npm test      # 82 тести: deploy config, security hardening, WS/reconnect/WebRTC-сесія, audio worklet/engine/buses, relay protocol, rules, state-store, validation, Render-style integration
+npm test      # 85 тестів: deploy config, security hardening, WS/reconnect/WebRTC-сесія, audio worklet/engine/buses, relay protocol, rules, state-store, validation, Render-style integration
 npm start
 ```
 
@@ -120,7 +120,7 @@ npm start
 
 ### Чек-лист викладу (Phase 4)
 
-1. `npm ci && npm test` локально — усі тести мають бути зеленими (зараз 82).
+1. `npm ci && npm test` локально — усі тести мають бути зеленими (зараз 85).
 2. Створіть Upstash Redis REST і тримайте URL/токен готовим; PIN не зберігайте в репо.
 3. Створіть сервіс із `render.yaml` (або вручну: Node 22, `npm ci && npm test`, `npm start`, `/api/health`, **1 інстанс**, гілка `render-hardening`, без диска) і заповніть `sync: false` змінні в Dashboard. Після злиття в `main` або приберіть `branch:` з Blueprint, або змініть його на `main`, інакше нові коміти в `main` не деплоїтимуться.
 4. Після першого деплою відкрийте `https://<service>.onrender.com/api/health`: `status: ok`, `storageMode: upstash`, `clients: 0`, `lastSyncAt` не порожній.

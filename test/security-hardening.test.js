@@ -579,3 +579,87 @@ test('a superseded instance cannot overwrite the newer KV snapshot', { timeout: 
   clientA.ws.close();
 });
 
+test('security headers allow the Google Fonts stylesheet and font files', { timeout: 30000 }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feria-csp-'));
+  const port = await freePort();
+  const server = await startServer(localEnv(port, dir));
+  t.after(async () => {
+    await stopServer(server);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const res = await fetch(`http://127.0.0.1:${port}/`);
+  const csp = res.headers.get('content-security-policy');
+  assert.ok(csp, 'the document must carry a CSP');
+  assert.match(csp, /style-src[^;]*https:\/\/fonts\.googleapis\.com/,
+    'the external Google Fonts stylesheet must not be blocked');
+  assert.match(csp, /font-src[^;]*https:\/\/fonts\.gstatic\.com/,
+    'the external font files must not be blocked');
+  assert.equal(res.headers.get('x-frame-options'), 'DENY');
+  assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+});
+
+test('a server with no configured PIN refuses DM access instead of accepting "null"', { timeout: 30000 }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feria-no-pin-local-'));
+  // Force the stored PIN to null so neither the env var nor the seed provides one.
+  fs.writeFileSync(
+    path.join(dir, 'campaign-state.json'),
+    JSON.stringify({ dmPin: null, languages: [], characters: [], messages: [] })
+  );
+  const port = await freePort();
+  const server = await startServer(localEnv(port, dir, { FERIA_DM_PIN: '' }));
+  t.after(async () => {
+    await stopServer(server);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const dm = await connectClient(port);
+  dm.send({ type: 'JOIN', role: 'dm', pin: 'null' });
+  const error = await dm.waitFor('JOIN_ERROR');
+  assert.match(error.error, /PIN/);
+  dm.ws.close();
+
+  const exportRes = await fetch(`http://127.0.0.1:${port}/api/export-state`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ pin: 'null' })
+  });
+  assert.equal(exportRes.status, 403, 'the literal "null" must never be a valid PIN');
+});
+
+test('deleting a language does not reveal the plaintext of old messages', { timeout: 30000 }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feria-deleted-lang-'));
+  const port = await freePort();
+  const server = await startServer(localEnv(port, dir));
+  t.after(async () => {
+    await stopServer(server);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const dm = await connectClient(port);
+  dm.send({ type: 'JOIN', role: 'dm', pin: PIN });
+  await dm.waitFor('JOIN_SUCCESS');
+  dm.clear();
+
+  dm.send({ type: 'CHAT_MESSAGE', text: 'СЕКРЕТ-ДРАКОНА', languageId: 'draconic' });
+  const posted = await dm.waitFor('CHAT_MESSAGE_NEW');
+  assert.equal(posted.message.text, 'СЕКРЕТ-ДРАКОНА', 'the DM understands the language');
+
+  dm.send({ type: 'DM_DELETE_LANGUAGE', languageId: 'draconic' });
+  await dm.waitFor('STATE_SYNC');
+  dm.ws.close();
+
+  // Liora never knew Draconic; after the language is deleted the old message
+  // must stay unreadable instead of falling back to Common plaintext.
+  const liora = await connectClient(port);
+  liora.send({ type: 'JOIN', role: 'player', characterId: 'liora' });
+  const joined = await liora.waitFor('JOIN_SUCCESS');
+  const projected = joined.messages.find((m) => m.id === posted.message.id);
+  assert.ok(projected, 'the old message is still in history');
+  assert.notEqual(projected.text, 'СЕКРЕТ-ДРАКОНА', 'deleting a language must not reveal plaintext');
+  assert.equal(projected.understood, false);
+  assert.equal(projected.languageId, 'unknown');
+  assert.equal(projected.languageName, 'Невідома мова');
+  liora.ws.close();
+});
+

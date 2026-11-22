@@ -55,7 +55,7 @@ const rateLimits = {
   chat: new RateLimiter({ capacity: 5, refillPerSec: 2 }),
   mutation: new RateLimiter({ capacity: 10, refillPerSec: 5 }),
   speaking: new RateLimiter({ capacity: 20, refillPerSec: 20 }),
-  relay: new RateLimiter({ capacity: 131072, refillPerSec: 131072 }),
+  relay: new RateLimiter({ capacity: 524288, refillPerSec: 524288 }),
   signaling: new RateLimiter({ capacity: 30, refillPerSec: 10 }),
   pin: new RateLimiter({ capacity: 5, refillPerSec: 1 / 60 })
 };
@@ -69,6 +69,9 @@ async function initialize() {
   // during Render's zero-downtime overlap window.
   await store.claimOwnership();
   state = await store.load();
+  // In production the env var PIN always wins over an imported backup so a
+  // restored snapshot cannot silently reintroduce the seed PIN.
+  if (DM_PIN) state.dmPin = DM_PIN;
   messages = Array.isArray(state.messages) ? state.messages : [];
   state.messages = messages;
   indexesVersion = -1;
@@ -239,6 +242,10 @@ function buildCharactersForClient(client) {
   }
   return state.characters.map((char) => {
     const pub = buildPublicCharacter(char);
+    // Buffs and forced language are DM-only information.
+    delete pub.comprehendLanguages;
+    delete pub.tongues;
+    delete pub.forcedLanguage;
     if (char.id === client.characterId) {
       pub.languages = [...(char.languages || [])];
     }
@@ -255,12 +262,11 @@ function isWhisperAllowed(speakerClient, listenerClient) {
   // DMs already see every whisper in the chat projection; keep audio consistent.
   if (listenerClient.role === 'dm') return true;
   if (listenerClient.id === speakerClient.id) return true;
-  if (speakerClient.whisperTargetClientId && listenerClient.id === speakerClient.whisperTargetClientId) {
-    return true;
-  }
-  if (speakerClient.whisperTargetCharacterId && listenerClient.characterId === speakerClient.whisperTargetCharacterId) {
-    return true;
-  }
+  // Bind whisper delivery to concrete sessions, not to reusable character ids.
+  // A later player taking the same character must not overhear old whispers.
+  const targetIds = speakerClient.whisperTargetClientIds ||
+    (speakerClient.whisperTargetClientId ? [speakerClient.whisperTargetClientId] : []);
+  if (targetIds.includes(listenerClient.id)) return true;
   return false;
 }
 
@@ -366,8 +372,19 @@ function buildPeerSummaryForListener(peerClient, listenerClient) {
 
 function projectMessageForListener(msg, listenerClient) {
   const listenerChar = getClientCharacter(listenerClient);
-  const lang = getLanguageById(msg.languageId) || getLanguageById('common');
-  const nativeUnderstood = canUnderstand(listenerClient.role, listenerChar, lang.id);
+  // A deleted language must never silently fall back to Common: that would
+  // reveal the stored plaintext of every old message to the whole party.
+  const knownLang = getLanguageById(msg.languageId);
+  const lang = knownLang || {
+    id: 'unknown',
+    name: 'Невідома мова',
+    icon: '?',
+    color: '#64748b',
+    scriptStyle: 'runic'
+  };
+  const nativeUnderstood = knownLang
+    ? canUnderstand(listenerClient.role, listenerChar, lang.id)
+    : listenerClient.role === 'dm';
 
   // Check manual reveal percentage from DM (for specific character or 'ALL')
   let revealPercent = 0;
@@ -575,6 +592,14 @@ app.use('/api', (_req, res, next) => {
   res.set('Cache-Control', 'no-store');
   next();
 });
+// Security headers on every response: prevent MIME sniffing, clickjacking and
+// inline script injection. The app serves only same-origin scripts/styles.
+app.use((_req, res, next) => {
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('X-Frame-Options', 'DENY');
+  res.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none';");
+  next();
+});
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/api/health', (_req, res) => {
@@ -604,8 +629,9 @@ app.post('/api/export-state', (req, res) => {
     res.status(429).json({ error: 'Too many attempts' });
     return;
   }
-  const expectedPin = DM_PIN || String(state.dmPin);
-  if (String(req.body?.pin || '') !== String(expectedPin)) {
+  // Fail closed: with no operator PIN and no stored PIN there is no valid code.
+  const expectedPin = DM_PIN || state.dmPin;
+  if (!expectedPin || String(req.body?.pin || '') !== String(expectedPin)) {
     res.status(403).json({ error: 'Invalid DM PIN' });
     return;
   }
@@ -701,10 +727,12 @@ function disconnectClient(targetClient, closeWs = true) {
   if (wasJoined) {
     for (const other of clients.values()) {
       if (!other.joined) continue;
-      if (other.whisperTargetClientId === targetClient.id ||
-          (targetClient.characterId && other.whisperTargetCharacterId === targetClient.characterId)) {
+      const targetIds = other.whisperTargetClientIds ||
+        (other.whisperTargetClientId ? [other.whisperTargetClientId] : []);
+      if (targetIds.includes(targetClient.id)) {
         other.whisperTargetClientId = null;
         other.whisperTargetCharacterId = null;
+        other.whisperTargetClientIds = [];
         sendJson(other.ws, {
           type: 'SELF_WHISPER_UPDATED',
           targetClientId: null,
@@ -739,13 +767,15 @@ function pruneStaleSessions() {
     .filter((c) => c.joined).map((c) => c.id));
   for (const client of clients.values()) {
     if (!client.joined) continue;
-    const staleClient = client.whisperTargetClientId &&
-      !joinedIds.has(client.whisperTargetClientId);
+    const targetIds = client.whisperTargetClientIds ||
+      (client.whisperTargetClientId ? [client.whisperTargetClientId] : []);
+    const staleClient = targetIds.some((id) => !joinedIds.has(id));
     const staleChar = client.whisperTargetCharacterId &&
       !validCharIds.has(client.whisperTargetCharacterId);
     if (!staleClient && !staleChar) continue;
     client.whisperTargetClientId = null;
     client.whisperTargetCharacterId = null;
+    client.whisperTargetClientIds = [];
     sendJson(client.ws, {
       type: 'SELF_WHISPER_UPDATED',
       targetClientId: null,
@@ -924,13 +954,13 @@ function handleMessage(client, data) {
       client.speakingLevel = 0;
       client.relayProtocol = data.relayProtocol === 2 ? 2 : 1;
       if (role === 'dm') {
-        const expectedPin = DM_PIN || String(state.dmPin);
+        const expectedPin = DM_PIN || state.dmPin;
         const pinBucket = `pin:${client.ip}`;
         if (!rateLimits.pin.consume(pinBucket)) {
           sendJson(client.ws, { type: 'JOIN_ERROR', error: 'Забагато спроб входу. Спробуйте пізніше.' });
           return;
         }
-        if (String(data.pin || '') !== String(expectedPin)) {
+        if (!expectedPin || String(data.pin || '') !== String(expectedPin)) {
           sendJson(client.ws, { type: 'JOIN_ERROR', error: 'Невірний PIN-код Майстра.' });
           return;
         }
@@ -1063,6 +1093,13 @@ function handleMessage(client, data) {
       const targetChar = targetCharacterId
         ? getCharacterById(targetCharacterId)
         : (targetPeer ? getClientCharacter(targetPeer) : null);
+
+      // Refuse whispers to a client that is not joined: the target would never
+      // receive audio and the UI would show a misleading active whisper banner.
+      if (targetClientId && (!targetPeer || !targetPeer.joined)) {
+        sendJson(client.ws, { type: 'ERROR', error: 'Ціль не в кімнаті.' });
+        return;
+      }
 
       client.whisperTargetClientId = targetPeer ? targetPeer.id : targetClientId;
       client.whisperTargetCharacterId = targetChar ? targetChar.id : targetCharacterId;
